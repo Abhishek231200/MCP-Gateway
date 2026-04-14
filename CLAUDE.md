@@ -91,10 +91,10 @@ User → React (Vite :5173)
 ### Backend structure (`apps/api/src/mcp_gateway/`)
 
 - **`config.py`** — single `Settings` object (Pydantic Settings) read from `.env`. Import `settings` everywhere instead of `os.getenv`.
-- **`database.py`** — async SQLAlchemy engine + `AsyncSessionLocal`. Use `get_db` as a FastAPI `Depends` to get a session; commits on success, rolls back on exception.
-- **`main.py`** — `create_app()` factory. Add new routers here via `app.include_router(...)`.
-- **`models/`** — SQLAlchemy ORM models that map to the PostgreSQL schema. All models must be imported in `models/__init__.py` so Alembic's `autogenerate` detects them.
-- **`routers/`** — one file per feature domain (e.g. `health.py`, future `registry.py`, `workflows.py`).
+- **`database.py`** — async SQLAlchemy engine + `AsyncSessionLocal`. `pool_pre_ping=True` is set; `echo=settings.debug` logs all SQL when `DEBUG=true`. Use `get_db` as a FastAPI `Depends` to get a session; commits on success, rolls back on exception.
+- **`main.py`** — `create_app()` factory. Uses `structlog` for structured logging (dev: colored console, prod: JSON). Add new routers via `app.include_router(...)`.
+- **`models/`** — SQLAlchemy ORM models. All models are imported in `models/__init__.py` — **required** for Alembic `autogenerate` to detect schema changes.
+- **`routers/`** — one file per feature domain (`health.py`; add `registry.py`, `workflows.py` as features are built).
 
 ### Database schema (PostgreSQL)
 
@@ -131,6 +131,18 @@ Key `.env` variables (see `.env.example` for full list):
 - `REDIS_URL` — used for rate limiting and pub/sub
 - `ENVIRONMENT` — `development` | `test` | `production` (disables `/docs` and `/redoc` in production)
 - `DEBUG=true` — enables SQLAlchemy query logging
+
+## Known Gotchas
+
+These have already bitten us — don't repeat them:
+
+- **`CORS_ORIGINS` must be JSON in `.env`** — pydantic-settings v2 runs `json.loads()` on `list[str]` fields *before* any validator runs. A comma-separated string causes a `SettingsError` at startup. Always use: `CORS_ORIGINS=["http://localhost:5173","http://localhost:3000"]`
+
+- **Docker inter-container networking uses service names** — inside Docker Compose, `localhost` resolves to the container itself. Use the Compose service name: `http://api:8000`, `postgresql+asyncpg://mcp_user:mcp_password@postgres:5432/mcp_gateway`, `redis://redis:6379/0`. The `DATABASE_URL` and `REDIS_URL` overrides in `docker-compose.yml` already handle this for the API; don't change them to `localhost`.
+
+- **Editable install needs `src/` to exist** — the API Dockerfile creates a stub `src/mcp_gateway/__init__.py` before running `pip install -e ".[dev]"` so setuptools can resolve the package root. The real source is copied/mounted afterwards. Do not remove this step.
+
+- **`pyproject.toml` build-backend must be `setuptools.build_meta`** — `setuptools.backends.legacy:build` requires setuptools ≥ 69 which isn't bundled in `python:3.12-slim`. Keep `build-backend = "setuptools.build_meta"`.
 
 ## CI
 
