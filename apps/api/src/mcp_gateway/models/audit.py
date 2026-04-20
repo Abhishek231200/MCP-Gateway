@@ -1,8 +1,8 @@
 """AuditLog model — immutable record of every tool invocation."""
 
-import enum
 import uuid
 from datetime import datetime
+from enum import StrEnum
 
 from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -11,7 +11,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from mcp_gateway.database import Base
 
 
-class AuditAction(str, enum.Enum):
+class AuditAction(StrEnum):
     TOOL_CALL = "tool_call"
     TOOL_BLOCKED = "tool_blocked"
     RATE_LIMITED = "rate_limited"
@@ -49,7 +49,8 @@ class AuditLog(Base):
     )
 
     action: Mapped[AuditAction] = mapped_column(
-        Enum(AuditAction), nullable=False, index=True
+        Enum(AuditAction, values_callable=lambda obj: [e.value for e in obj]),
+        nullable=False, index=True
     )
     # Actor: "agent:<role>", "user:<id>", "system"
     actor: Mapped[str] = mapped_column(String(256), nullable=False, index=True)

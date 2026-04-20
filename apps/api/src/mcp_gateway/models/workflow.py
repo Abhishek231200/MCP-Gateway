@@ -1,8 +1,8 @@
 """Workflow and WorkflowStep models — multi-tool execution tracking."""
 
-import enum
 import uuid
 from datetime import datetime
+from enum import StrEnum
 
 from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -11,7 +11,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from mcp_gateway.database import Base
 
 
-class WorkflowStatus(str, enum.Enum):
+class WorkflowStatus(StrEnum):
     PENDING = "pending"
     PLANNING = "planning"
     RUNNING = "running"
@@ -21,7 +21,7 @@ class WorkflowStatus(str, enum.Enum):
     CANCELLED = "cancelled"
 
 
-class StepStatus(str, enum.Enum):
+class StepStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -43,7 +43,7 @@ class Workflow(Base):
     initiated_by: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
 
     status: Mapped[WorkflowStatus] = mapped_column(
-        Enum(WorkflowStatus),
+        Enum(WorkflowStatus, values_callable=lambda obj: [e.value for e in obj]),
         nullable=False,
         default=WorkflowStatus.PENDING,
         index=True,
@@ -102,7 +102,8 @@ class WorkflowStep(Base):
     tool_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
 
     status: Mapped[StepStatus] = mapped_column(
-        Enum(StepStatus), nullable=False, default=StepStatus.PENDING, index=True
+        Enum(StepStatus, values_callable=lambda obj: [e.value for e in obj]),
+        nullable=False, default=StepStatus.PENDING, index=True
     )
     input_payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     output_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

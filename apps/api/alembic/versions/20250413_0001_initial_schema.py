@@ -19,30 +19,21 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     # ── Enum types ─────────────────────────────────────────────────────────────
-    auth_type = postgresql.ENUM(
-        "none", "api_key", "oauth2", "jwt", name="authtype", create_type=False
-    )
-    health_status = postgresql.ENUM(
-        "healthy", "degraded", "unhealthy", "unknown", name="healthstatus", create_type=False
-    )
-    workflow_status = postgresql.ENUM(
-        "pending", "planning", "running", "awaiting_approval",
-        "completed", "failed", "cancelled",
-        name="workflowstatus", create_type=False,
-    )
-    step_status = postgresql.ENUM(
-        "pending", "running", "completed", "failed", "skipped",
-        name="stepstatus", create_type=False,
-    )
-    audit_action = postgresql.ENUM(
-        "tool_call", "tool_blocked", "rate_limited", "injection_detected",
-        "workflow_started", "workflow_completed", "workflow_failed",
-        "server_registered", "server_deregistered",
-        name="auditaction", create_type=False,
-    )
+    # Raw SQL so creation is idempotent — DO block swallows duplicate_object on re-runs.
+    # postgresql.ENUM objects below use create_type=False so op.create_table never
+    # re-issues CREATE TYPE for columns that reference these types.
+    # asyncpg requires one statement per op.execute call
+    op.execute("DO $$ BEGIN CREATE TYPE authtype AS ENUM ('none', 'api_key', 'oauth2', 'jwt'); EXCEPTION WHEN duplicate_object THEN NULL; END $$")
+    op.execute("DO $$ BEGIN CREATE TYPE healthstatus AS ENUM ('healthy', 'degraded', 'unhealthy', 'unknown'); EXCEPTION WHEN duplicate_object THEN NULL; END $$")
+    op.execute("DO $$ BEGIN CREATE TYPE workflowstatus AS ENUM ('pending', 'planning', 'running', 'awaiting_approval', 'completed', 'failed', 'cancelled'); EXCEPTION WHEN duplicate_object THEN NULL; END $$")
+    op.execute("DO $$ BEGIN CREATE TYPE stepstatus AS ENUM ('pending', 'running', 'completed', 'failed', 'skipped'); EXCEPTION WHEN duplicate_object THEN NULL; END $$")
+    op.execute("DO $$ BEGIN CREATE TYPE auditaction AS ENUM ('tool_call', 'tool_blocked', 'rate_limited', 'injection_detected', 'workflow_started', 'workflow_completed', 'workflow_failed', 'server_registered', 'server_deregistered'); EXCEPTION WHEN duplicate_object THEN NULL; END $$")
 
-    for enum_type in [auth_type, health_status, workflow_status, step_status, audit_action]:
-        enum_type.create(op.get_bind(), checkfirst=True)
+    auth_type = postgresql.ENUM("none", "api_key", "oauth2", "jwt", name="authtype", create_type=False)
+    health_status = postgresql.ENUM("healthy", "degraded", "unhealthy", "unknown", name="healthstatus", create_type=False)
+    workflow_status = postgresql.ENUM("pending", "planning", "running", "awaiting_approval", "completed", "failed", "cancelled", name="workflowstatus", create_type=False)
+    step_status = postgresql.ENUM("pending", "running", "completed", "failed", "skipped", name="stepstatus", create_type=False)
+    audit_action = postgresql.ENUM("tool_call", "tool_blocked", "rate_limited", "injection_detected", "workflow_started", "workflow_completed", "workflow_failed", "server_registered", "server_deregistered", name="auditaction", create_type=False)
 
     # ── mcp_servers ────────────────────────────────────────────────────────────
     op.create_table(
@@ -53,14 +44,9 @@ def upgrade() -> None:
         sa.Column("description", sa.Text, nullable=True),
         sa.Column("base_url", sa.String(2048), nullable=False),
         sa.Column("version", sa.String(32), nullable=False, server_default="1.0.0"),
-        sa.Column("auth_type", sa.Enum("none", "api_key", "oauth2", "jwt", name="authtype"), nullable=False),
+        sa.Column("auth_type", auth_type, nullable=False),
         sa.Column("auth_config", postgresql.JSONB, nullable=False, server_default="{}"),
-        sa.Column(
-            "health_status",
-            sa.Enum("healthy", "degraded", "unhealthy", "unknown", name="healthstatus"),
-            nullable=False,
-            server_default="unknown",
-        ),
+        sa.Column("health_status", health_status, nullable=False, server_default="unknown"),
         sa.Column("last_health_check", sa.DateTime(timezone=True), nullable=True),
         sa.Column("is_active", sa.Boolean, nullable=False, server_default="true"),
         sa.Column("metadata", postgresql.JSONB, nullable=False, server_default="{}"),
@@ -100,16 +86,7 @@ def upgrade() -> None:
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("task", sa.Text, nullable=False),
         sa.Column("initiated_by", sa.String(256), nullable=False),
-        sa.Column(
-            "status",
-            sa.Enum(
-                "pending", "planning", "running", "awaiting_approval",
-                "completed", "failed", "cancelled",
-                name="workflowstatus",
-            ),
-            nullable=False,
-            server_default="pending",
-        ),
+        sa.Column("status", workflow_status, nullable=False, server_default="pending"),
         sa.Column("plan", postgresql.JSONB, nullable=False, server_default="{}"),
         sa.Column("result", postgresql.JSONB, nullable=True),
         sa.Column("error_message", sa.Text, nullable=True),
@@ -137,12 +114,7 @@ def upgrade() -> None:
         sa.Column("agent_role", sa.String(64), nullable=False),
         sa.Column("server_name", sa.String(128), nullable=True),
         sa.Column("tool_name", sa.String(256), nullable=True),
-        sa.Column(
-            "status",
-            sa.Enum("pending", "running", "completed", "failed", "skipped", name="stepstatus"),
-            nullable=False,
-            server_default="pending",
-        ),
+        sa.Column("status", step_status, nullable=False, server_default="pending"),
         sa.Column("input_payload", postgresql.JSONB, nullable=False, server_default="{}"),
         sa.Column("output_payload", postgresql.JSONB, nullable=True),
         sa.Column("error_message", sa.Text, nullable=True),
@@ -170,16 +142,7 @@ def upgrade() -> None:
             sa.ForeignKey("workflow_steps.id", ondelete="SET NULL"),
             nullable=True,
         ),
-        sa.Column(
-            "action",
-            sa.Enum(
-                "tool_call", "tool_blocked", "rate_limited", "injection_detected",
-                "workflow_started", "workflow_completed", "workflow_failed",
-                "server_registered", "server_deregistered",
-                name="auditaction",
-            ),
-            nullable=False,
-        ),
+        sa.Column("action", audit_action, nullable=False),
         sa.Column("actor", sa.String(256), nullable=False),
         sa.Column("server_name", sa.String(128), nullable=True),
         sa.Column("tool_name", sa.String(256), nullable=True),

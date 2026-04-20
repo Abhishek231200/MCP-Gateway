@@ -1,13 +1,16 @@
 """FastAPI application factory and startup/shutdown lifecycle."""
 
+import asyncio
 import logging
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager, suppress
 
 import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from mcp_gateway.config import settings
-from mcp_gateway.routers import health
+from mcp_gateway.routers import health, registry
 
 # ─── Logging setup ────────────────────────────────────────────────────────────
 logging.basicConfig(level=settings.log_level.upper())
@@ -25,8 +28,28 @@ structlog.configure(
 )
 logger = structlog.get_logger()
 
-# ─── Application factory ──────────────────────────────────────────────────────
 
+# ─── Lifespan ─────────────────────────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
+    logger.info("MCP Gateway starting", environment=settings.environment)
+
+    scheduler_task: asyncio.Task | None = None
+    if settings.environment != "test":
+        from mcp_gateway.services.health_scheduler import health_check_loop
+        scheduler_task = asyncio.create_task(health_check_loop())
+
+    yield
+
+    if scheduler_task:
+        scheduler_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await scheduler_task
+    logger.info("MCP Gateway shutting down")
+
+
+# ─── Application factory ──────────────────────────────────────────────────────
 
 def create_app() -> FastAPI:
     app = FastAPI(
@@ -35,9 +58,9 @@ def create_app() -> FastAPI:
         version="0.1.0",
         docs_url="/docs" if not settings.is_production else None,
         redoc_url="/redoc" if not settings.is_production else None,
+        lifespan=lifespan,
     )
 
-    # CORS
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
@@ -46,16 +69,8 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Routers
     app.include_router(health.router)
-
-    @app.on_event("startup")
-    async def on_startup() -> None:
-        logger.info("MCP Gateway starting", environment=settings.environment)
-
-    @app.on_event("shutdown")
-    async def on_shutdown() -> None:
-        logger.info("MCP Gateway shutting down")
+    app.include_router(registry.router)
 
     return app
 

@@ -1,8 +1,8 @@
 """MCP Registry models — server catalog and capabilities."""
 
-import enum
 import uuid
 from datetime import datetime
+from enum import StrEnum
 
 from sqlalchemy import (
     Boolean,
@@ -20,14 +20,14 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from mcp_gateway.database import Base
 
 
-class AuthType(str, enum.Enum):
+class AuthType(StrEnum):
     NONE = "none"
     API_KEY = "api_key"
     OAUTH2 = "oauth2"
     JWT = "jwt"
 
 
-class HealthStatus(str, enum.Enum):
+class HealthStatus(StrEnum):
     HEALTHY = "healthy"
     DEGRADED = "degraded"
     UNHEALTHY = "unhealthy"
@@ -49,13 +49,15 @@ class McpServer(Base):
     version: Mapped[str] = mapped_column(String(32), nullable=False, default="1.0.0")
 
     auth_type: Mapped[AuthType] = mapped_column(
-        Enum(AuthType), nullable=False, default=AuthType.NONE
+        Enum(AuthType, values_callable=lambda obj: [e.value for e in obj]),
+        nullable=False, default=AuthType.NONE
     )
     # Encrypted credential config stored as JSONB (e.g. {"token_env_var": "GITHUB_TOKEN"})
     auth_config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
     health_status: Mapped[HealthStatus] = mapped_column(
-        Enum(HealthStatus), nullable=False, default=HealthStatus.UNKNOWN, index=True
+        Enum(HealthStatus, values_callable=lambda obj: [e.value for e in obj]),
+        nullable=False, default=HealthStatus.UNKNOWN, index=True
     )
     last_health_check: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
