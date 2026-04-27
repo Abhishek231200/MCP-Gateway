@@ -35,7 +35,7 @@ logger = structlog.get_logger()
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("MCP Gateway starting", environment=settings.environment)
 
-    scheduler_task: asyncio.Task | None = None
+    scheduler_task: asyncio.Task[None] | None = None
     if settings.environment != "test":
         from mcp_gateway.services.health_scheduler import health_check_loop
         scheduler_task = asyncio.create_task(health_check_loop())

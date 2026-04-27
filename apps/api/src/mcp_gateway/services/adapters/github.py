@@ -108,7 +108,7 @@ _TOOL_DEFINITIONS = [
 ]
 
 
-def _normalize_repo(r: dict) -> dict:
+def _normalize_repo(r: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": r.get("id"),
         "name": r.get("name"),
@@ -123,7 +123,7 @@ def _normalize_repo(r: dict) -> dict:
     }
 
 
-def _normalize_pr(pr: dict) -> dict:
+def _normalize_pr(pr: dict[str, Any]) -> dict[str, Any]:
     return {
         "number": pr.get("number"),
         "title": pr.get("title"),
@@ -140,7 +140,7 @@ def _normalize_pr(pr: dict) -> dict:
     }
 
 
-def _normalize_issue(issue: dict) -> dict:
+def _normalize_issue(issue: dict[str, Any]) -> dict[str, Any]:
     return {
         "number": issue.get("number"),
         "title": issue.get("title"),
@@ -155,7 +155,7 @@ def _normalize_issue(issue: dict) -> dict:
     }
 
 
-def _normalize_file(f: dict) -> dict:
+def _normalize_file(f: dict[str, Any]) -> dict[str, Any]:
     import base64
 
     content_raw = f.get("content", "")
@@ -184,7 +184,7 @@ async def _gh_request(
     method: str,
     path: str,
     headers: dict[str, str],
-    params: dict | None = None,
+    params: dict[str, Any] | None = None,
 ) -> Any:
     default_headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
     merged = {**default_headers, **headers}
@@ -203,14 +203,14 @@ class GitHubAdapter(BaseAdapter):
     def adapter_type(self) -> str:
         return "github"
 
-    def _get_tool_definitions(self) -> list[dict]:
+    def _get_tool_definitions(self) -> list[dict[str, Any]]:
         return _TOOL_DEFINITIONS
 
     async def _execute_tool(
         self,
         server: McpServer,
         tool_name: str,
-        arguments: dict,
+        arguments: dict[str, Any],
         headers: dict[str, str],
     ) -> Any:
         match tool_name:
@@ -229,19 +229,19 @@ class GitHubAdapter(BaseAdapter):
             case _:
                 raise AdapterError(f"Unknown tool '{tool_name}' for GitHub adapter")
 
-    async def _list_repos(self, args: dict, headers: dict) -> list[dict]:
+    async def _list_repos(self, args: dict[str, Any], headers: dict[str, str]) -> list[dict[str, Any]]:
         org = args.get("org")
         per_page = args.get("per_page", 30)
         path = f"/orgs/{org}/repos" if org else "/user/repos"
         data = await _gh_request("GET", path, headers, params={"per_page": per_page})
         return [_normalize_repo(r) for r in data]
 
-    async def _get_pr(self, args: dict, headers: dict) -> dict:
+    async def _get_pr(self, args: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
         owner, repo, number = args["owner"], args["repo"], args["number"]
         data = await _gh_request("GET", f"/repos/{owner}/{repo}/pulls/{number}", headers)
         return _normalize_pr(data)
 
-    async def _list_prs(self, args: dict, headers: dict) -> list[dict]:
+    async def _list_prs(self, args: dict[str, Any], headers: dict[str, str]) -> list[dict[str, Any]]:
         owner, repo = args["owner"], args["repo"]
         state = args.get("state", "open")
         per_page = args.get("per_page", 30)
@@ -251,12 +251,12 @@ class GitHubAdapter(BaseAdapter):
         )
         return [_normalize_pr(pr) for pr in data]
 
-    async def _get_issue(self, args: dict, headers: dict) -> dict:
+    async def _get_issue(self, args: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
         owner, repo, number = args["owner"], args["repo"], args["number"]
         data = await _gh_request("GET", f"/repos/{owner}/{repo}/issues/{number}", headers)
         return _normalize_issue(data)
 
-    async def _list_issues(self, args: dict, headers: dict) -> list[dict]:
+    async def _list_issues(self, args: dict[str, Any], headers: dict[str, str]) -> list[dict[str, Any]]:
         owner, repo = args["owner"], args["repo"]
         state = args.get("state", "open")
         per_page = args.get("per_page", 30)
@@ -267,7 +267,7 @@ class GitHubAdapter(BaseAdapter):
         # GitHub issues endpoint returns both issues and PRs; filter to issues only
         return [_normalize_issue(i) for i in data if "pull_request" not in i]
 
-    async def _get_file_contents(self, args: dict, headers: dict) -> dict:
+    async def _get_file_contents(self, args: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
         owner, repo, path = args["owner"], args["repo"], args["path"]
         params = {}
         if ref := args.get("ref"):

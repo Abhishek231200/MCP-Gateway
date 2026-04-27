@@ -3,6 +3,7 @@
 import uuid
 from datetime import datetime
 from enum import StrEnum
+from typing import Any
 
 from sqlalchemy import (
     Boolean,
@@ -53,7 +54,7 @@ class McpServer(Base):
         nullable=False, default=AuthType.NONE
     )
     # Encrypted credential config stored as JSONB (e.g. {"token_env_var": "GITHUB_TOKEN"})
-    auth_config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    auth_config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
 
     health_status: Mapped[HealthStatus] = mapped_column(
         Enum(HealthStatus, values_callable=lambda obj: [e.value for e in obj]),
@@ -63,7 +64,7 @@ class McpServer(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
 
     # Extra metadata (tags, owner, etc.)
-    metadata_: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, default=dict)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, nullable=False, default=dict)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -97,9 +98,9 @@ class ServerCapability(Base):
     tool_name: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     # JSON Schema for input parameters
-    input_schema: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    input_schema: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     # JSON Schema for output
-    output_schema: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    output_schema: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     # Permission level required: "read", "write", "admin"
     required_permission: Mapped[str] = mapped_column(
         String(32), nullable=False, default="read", index=True

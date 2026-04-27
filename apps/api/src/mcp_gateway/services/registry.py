@@ -86,7 +86,7 @@ async def list_tools(
         stmt = stmt.where(ServerCapability.required_permission == required_permission)
     stmt = stmt.order_by(McpServer.name, ServerCapability.tool_name)
     result = await db.execute(stmt)
-    return result.all()
+    return result.tuples().all()
 
 
 # ── Writes ─────────────────────────────────────────────────────────────────────
@@ -183,14 +183,14 @@ async def replace_capabilities(
         await db.delete(cap)
     await db.flush()
 
-    for cap in capabilities:
+    for new_cap in capabilities:
         db.add(ServerCapability(
             server_id=server_id,
-            tool_name=cap.tool_name,
-            description=cap.description,
-            input_schema=cap.input_schema,
-            output_schema=cap.output_schema,
-            required_permission=cap.required_permission,
+            tool_name=new_cap.tool_name,
+            description=new_cap.description,
+            input_schema=new_cap.input_schema,
+            output_schema=new_cap.output_schema,
+            required_permission=new_cap.required_permission,
         ))
 
     await db.flush()

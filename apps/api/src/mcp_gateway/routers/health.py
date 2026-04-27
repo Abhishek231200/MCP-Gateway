@@ -50,7 +50,7 @@ async def health(db: AsyncSession = Depends(get_db)) -> HealthResponse:
     t0 = time.perf_counter()
     try:
         r = aioredis.from_url(settings.redis_url, decode_responses=True)
-        await r.ping()
+        await r.ping()  # type: ignore[misc]
         await r.aclose()
         deps["redis"] = DependencyStatus(
             status="healthy",

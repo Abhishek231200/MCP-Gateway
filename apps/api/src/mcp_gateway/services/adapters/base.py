@@ -18,7 +18,7 @@ logger = structlog.get_logger()
 class ToolResult(TypedDict):
     result: Any
     latency_ms: int
-    metadata: dict
+    metadata: dict[str, Any]
 
 
 class AdapterError(Exception):
@@ -52,7 +52,7 @@ class BaseAdapter(ABC):
         self,
         server: McpServer,
         tool_name: str,
-        arguments: dict,
+        arguments: dict[str, Any],
         headers: dict[str, str],
     ) -> Any:
         """Perform the actual tool call and return a normalized result.
@@ -62,14 +62,14 @@ class BaseAdapter(ABC):
         ...
 
     @abstractmethod
-    def _get_tool_definitions(self) -> list[dict]:
+    def _get_tool_definitions(self) -> list[dict[str, Any]]:
         """Return static tool definitions for this adapter.
 
         Each dict: tool_name, description, input_schema, output_schema, required_permission.
         """
         ...
 
-    async def list_tools(self, server: McpServer) -> list[dict]:
+    async def list_tools(self, server: McpServer) -> list[dict[str, Any]]:
         """Return this adapter's tool manifest (no DB or network call)."""
         return self._get_tool_definitions()
 
@@ -77,7 +77,7 @@ class BaseAdapter(ABC):
         self,
         server: McpServer,
         tool_name: str,
-        arguments: dict,
+        arguments: dict[str, Any],
         db: AsyncSession,
         actor: str = "system",
     ) -> ToolResult:
