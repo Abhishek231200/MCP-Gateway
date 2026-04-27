@@ -86,7 +86,7 @@ async def list_tools(
         stmt = stmt.where(ServerCapability.required_permission == required_permission)
     stmt = stmt.order_by(McpServer.name, ServerCapability.tool_name)
     result = await db.execute(stmt)
-    return result.tuples().all()
+    return list(result.tuples().all())
 
 
 # ── Writes ─────────────────────────────────────────────────────────────────────
