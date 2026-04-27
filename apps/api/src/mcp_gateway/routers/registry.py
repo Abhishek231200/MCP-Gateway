@@ -12,7 +12,6 @@ from mcp_gateway.schemas.registry import (
     CapabilityCreate,
     ServerCreate,
     ServerListResponse,
-    ServerResponse,
     ServerUpdate,
     ServerWithCapabilities,
     ToolListResponse,

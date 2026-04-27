@@ -236,24 +236,25 @@ async def test_search_tools_by_permission(registry_client: AsyncClient) -> None:
 
 @pytest.mark.asyncio
 async def test_health_check_marks_healthy(registry_client: AsyncClient, db_session) -> None:
-    """Scheduler correctly updates health_status based on HTTP probe result."""
+    """Newly registered servers start as unknown; probe logic classifies correctly."""
     from unittest.mock import AsyncMock, patch
 
-    from mcp_gateway.services.health_scheduler import run_checks
+    from mcp_gateway.models.registry import HealthStatus
+    from mcp_gateway.services.health_scheduler import _probe
 
     created = (await registry_client.post("/registry/servers", json=GITHUB_SERVER)).json()
+    assert created["health_status"] == "unknown"
 
-    # Commit the test data so the scheduler's own session can read it
-    await db_session.commit()
+    # Verify the probe function itself classifies 2xx as healthy
+    with patch("mcp_gateway.services.health_scheduler.httpx.AsyncClient") as mock_cls:
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_cls.return_value = mock_client
 
-    with patch(
-        "mcp_gateway.services.health_scheduler._probe",
-        new=AsyncMock(return_value=__import__(
-            "mcp_gateway.models.registry", fromlist=["HealthStatus"]
-        ).HealthStatus.HEALTHY),
-    ):
-        await run_checks()
+        status = await _probe("http://fake-server:3000")
 
-    resp = await registry_client.get(f"/registry/servers/{created['id']}")
-    # Cache may have stale data; fetch fresh from DB
-    assert resp.json()["health_status"] in ("healthy", "unknown")
+    assert status == HealthStatus.HEALTHY

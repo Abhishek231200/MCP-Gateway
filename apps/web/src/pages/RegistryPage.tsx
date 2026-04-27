@@ -3,6 +3,7 @@ import {
   useServers,
   useRegisterServer,
   useDeregisterServer,
+  useUpdateServer,
 } from "@/hooks/useRegistry";
 import type { Capability, McpServer, RegisterServerPayload } from "@/hooks/useRegistry";
 
@@ -46,6 +47,76 @@ function PermissionBadge({ permission }: { permission: string }) {
     >
       {permission}
     </span>
+  );
+}
+
+// ── Auth config panel ─────────────────────────────────────────────────────────
+
+function AuthConfigPanel({ server }: { server: McpServer }) {
+  const [editing, setEditing] = useState(false);
+  const [tokenEnvVar, setTokenEnvVar] = useState(
+    (server.metadata as Record<string, string>)?.token_env_var ??
+    (server as unknown as { auth_config?: Record<string, string> }).auth_config?.token_env_var ?? ""
+  );
+  const update = useUpdateServer();
+
+  if (server.auth_type === "none") {
+    return (
+      <p className="text-xs text-gray-500">
+        Token source: <span className="text-gray-400">No auth required</span>
+      </p>
+    );
+  }
+
+  const tokenSource = (server as unknown as { auth_config?: Record<string, string> }).auth_config?.token_env_var;
+
+  if (!editing) {
+    return (
+      <div className="flex items-center gap-2 text-xs text-gray-500">
+        <span>
+          Token source:{" "}
+          <span className="font-mono text-gray-300">
+            {tokenSource ? `env:${tokenSource}` : "not configured"}
+          </span>
+        </span>
+        <button
+          onClick={() => setEditing(true)}
+          className="text-blue-400 hover:text-blue-300 transition-colors"
+        >
+          Edit
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-2 text-xs">
+      <span className="text-gray-500">env var:</span>
+      <input
+        className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-white font-mono text-xs focus:outline-none focus:border-blue-500 w-40"
+        value={tokenEnvVar}
+        onChange={(e) => setTokenEnvVar(e.target.value)}
+        placeholder="GITHUB_TOKEN"
+      />
+      <button
+        onClick={() => {
+          update.mutate(
+            { id: server.id, data: { auth_config: { token_env_var: tokenEnvVar } } },
+            { onSuccess: () => setEditing(false) },
+          );
+        }}
+        disabled={update.isPending}
+        className="text-blue-400 hover:text-blue-300 disabled:opacity-50 transition-colors"
+      >
+        {update.isPending ? "Saving…" : "Save"}
+      </button>
+      <button
+        onClick={() => setEditing(false)}
+        className="text-gray-500 hover:text-gray-300 transition-colors"
+      >
+        Cancel
+      </button>
+    </div>
   );
 }
 
@@ -114,11 +185,12 @@ function ServerCard({ server }: { server: McpServer }) {
       </div>
 
       {/* Meta row */}
-      <div className="flex items-center gap-4 text-xs text-gray-500">
+      <div className="flex items-center gap-4 text-xs text-gray-500 flex-wrap">
         <span>
           Auth:{" "}
           <span className="text-gray-300">{AUTH_LABELS[server.auth_type]}</span>
         </span>
+        <AuthConfigPanel server={server} />
         {server.last_health_check && (
           <span>
             Last checked:{" "}

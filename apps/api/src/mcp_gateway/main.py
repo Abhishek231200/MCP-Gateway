@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from mcp_gateway.config import settings
-from mcp_gateway.routers import health, registry
+from mcp_gateway.routers import health, registry, tools
 
 # ─── Logging setup ────────────────────────────────────────────────────────────
 logging.basicConfig(level=settings.log_level.upper())
@@ -71,6 +71,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(registry.router)
+    app.include_router(tools.router)
 
     return app
 

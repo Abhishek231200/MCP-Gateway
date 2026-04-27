@@ -21,40 +21,76 @@ async def client() -> AsyncClient:
 
 # ── DB fixtures for integration tests ─────────────────────────────────────────
 
-@pytest.fixture(scope="session")
-async def test_engine():
-    """Session-scoped engine; skips if Postgres is unreachable."""
-    engine = create_async_engine(settings.database_url, echo=False)
-    try:
-        async with engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
-    except Exception:
-        await engine.dispose()
-        pytest.skip("PostgreSQL not reachable — skipping integration tests")
-    yield engine
-    await engine.dispose()
+# Names used by test data — cleaned up after each test
+_TEST_SERVER_NAMES = (
+    "github-mcp-test",
+    "bare-server-test",
+    "github-mcp",
+    "slack-mcp",
+)
+
+
+def _check_pg_reachable(url: str) -> bool:
+    """Synchronous reachability check run at collection time."""
+    import asyncio
+    async def _probe():
+        engine = create_async_engine(url, echo=False)
+        try:
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+            return True
+        except Exception:
+            return False
+        finally:
+            await engine.dispose()
+    return asyncio.get_event_loop().run_until_complete(_probe())
 
 
 @pytest.fixture
-async def db_session(test_engine) -> AsyncSession:
+async def db_session():
     """
-    Function-scoped session wrapped in a rolled-back transaction so each test
-    starts with a clean slate without touching real data.
+    Function-scoped session backed by its own engine connection.
+    Each test gets a fresh connection; teardown deletes inserted test rows.
+    Skips automatically when Postgres is unreachable.
     """
-    conn = await test_engine.connect()
-    await conn.begin()
-    session = AsyncSession(
-        bind=conn, expire_on_commit=False, join_transaction_mode="create_savepoint"
-    )
-    yield session
-    await conn.rollback()
-    await conn.close()
+    engine = create_async_engine(settings.database_url, echo=False)
+    try:
+        async with engine.connect() as probe:
+            await probe.execute(text("SELECT 1"))
+    except Exception:
+        await engine.dispose()
+        pytest.skip("PostgreSQL not reachable — skipping integration tests")
+        return
+
+    session = AsyncSession(engine, expire_on_commit=False)
+    try:
+        yield session
+        # Best-effort cleanup of test rows
+        try:
+            names_tuple = ", ".join(f"'{n}'" for n in _TEST_SERVER_NAMES)
+            await session.execute(
+                text(f"DELETE FROM audit_logs WHERE server_name IN ({names_tuple})")
+            )
+            await session.execute(
+                text(f"DELETE FROM server_capabilities USING mcp_servers "
+                     f"WHERE server_capabilities.server_id = mcp_servers.id "
+                     f"AND mcp_servers.name IN ({names_tuple})")
+            )
+            await session.execute(
+                text(f"DELETE FROM mcp_servers WHERE name IN ({names_tuple})")
+            )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+    finally:
+        await session.close()
+        await engine.dispose()
 
 
 @pytest.fixture
 async def registry_client(db_session: AsyncSession) -> AsyncClient:
-    """AsyncClient with get_db overridden to use the test transaction session."""
-    async def _override() -> AsyncSession:
+    """AsyncClient with get_db overridden to use the test session."""
+    async def _override():
         yield db_session
 
     app.dependency_overrides[get_db] = _override
