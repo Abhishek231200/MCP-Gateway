@@ -42,7 +42,18 @@ export interface RegisterServerPayload {
   description?: string;
   base_url: string;
   auth_type: "none" | "api_key" | "oauth2" | "jwt";
+  auth_config?: Record<string, string>;
+  metadata?: Record<string, unknown>;
   capabilities?: Partial<Capability>[];
+}
+
+export interface UpdateServerPayload {
+  display_name?: string;
+  description?: string;
+  base_url?: string;
+  auth_config?: Record<string, string>;
+  metadata?: Record<string, unknown>;
+  is_active?: boolean;
 }
 
 export function useServers(activeOnly = true) {
@@ -74,6 +85,20 @@ export function useDeregisterServer() {
   return useMutation({
     mutationFn: async (serverId: string) => {
       await axios.delete(`/api/registry/servers/${serverId}`);
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["registry"] }),
+  });
+}
+
+export function useUpdateServer() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ id, data }: { id: string; data: UpdateServerPayload }) => {
+      const { data: updated } = await axios.patch<McpServer>(
+        `/api/registry/servers/${id}`,
+        data,
+      );
+      return updated;
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["registry"] }),
   });
