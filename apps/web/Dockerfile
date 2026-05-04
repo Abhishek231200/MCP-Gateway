@@ -16,7 +16,7 @@ CMD ["npm", "run", "dev"]
 FROM base AS builder
 
 COPY package.json package-lock.json* ./
-RUN npm ci
+RUN npm install --prefer-offline
 
 COPY . .
 RUN npm run build
