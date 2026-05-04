@@ -4,17 +4,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-MCP Gateway is a secure agentic AI orchestration platform. A Turborepo monorepo with two apps:
+MCP Gateway is a secure agentic AI orchestration platform. A Turborepo monorepo with three apps:
 - `apps/api` — FastAPI backend (Python 3.12)
 - `apps/web` — React 18 frontend (TypeScript)
+- `apps/kb` — Knowledge Base RAG service (FastAPI + sentence-transformers, Python 3.12)
 
 ## Development Commands
 
 ### Start everything (recommended)
 ```bash
-cp .env.example .env   # first time only
+cp .env.example .env   # first time only — fill in API tokens
 docker compose up --build
 # API:  http://localhost:8000  (docs at /docs)
+# KB:   http://localhost:8001  (docs at /docs)
 # Web:  http://localhost:5173
 ```
 
@@ -85,7 +87,7 @@ User → React (Vite :5173)
                                           ├─ GitHub MCP
                                           ├─ Slack MCP
                                           ├─ Google Drive MCP
-                                          └─ Knowledge Base MCP (RAG)
+                                          └─ Knowledge Base MCP (RAG) ← apps/kb/
 ```
 
 ### Backend structure (`apps/api/src/mcp_gateway/`)
@@ -94,8 +96,8 @@ User → React (Vite :5173)
 - **`database.py`** — async SQLAlchemy engine + `AsyncSessionLocal`. `pool_pre_ping=True` is set; `echo=settings.debug` logs all SQL when `DEBUG=true`. Use `get_db` as a FastAPI `Depends` to get a session; commits on success, rolls back on exception.
 - **`main.py`** — `create_app()` factory. Uses `structlog` for structured logging (dev: colored console, prod: JSON). Add new routers via `app.include_router(...)`.
 - **`models/`** — SQLAlchemy ORM models. All models are imported in `models/__init__.py` — **required** for Alembic `autogenerate` to detect schema changes.
-- **`routers/`** — one file per feature domain (`health.py`, `registry.py`, `tools.py`; add `workflows.py` as features are built).
-- **`schemas/`** — Pydantic request/response models (separate from ORM models). `ServerResponse` uses `validation_alias=AliasChoices("metadata_", "metadata")` to bridge the ORM's `metadata_` field name to the JSON field `metadata`.
+- **`routers/`** — one file per feature domain (`health.py`, `registry.py`, `tools.py`; add `workflows.py` for Week 5).
+- **`schemas/`** — Pydantic request/response models (separate from ORM models). `ServerResponse` includes `auth_config` (so the frontend can display `token_env_var`). Uses `validation_alias=AliasChoices("metadata_", "metadata")` to bridge the ORM's `metadata_` field name to the JSON field `metadata`.
 - **`services/`** — business logic: `registry.py` (CRUD + cache busting), `cache.py` (Redis get/set/invalidate/invalidate_prefix), `health_scheduler.py` (background asyncio loop), `adapters/` (MCP server adapter layer — see below). Cache busting always uses `cache_invalidate_prefix` for list/tools keys — never exact-key delete.
 
 ### Database schema (PostgreSQL)
@@ -112,7 +114,7 @@ Migrations live in `apps/api/alembic/versions/`. The Alembic env uses an async e
 - **`main.tsx`** — mounts React with `BrowserRouter`, `QueryClientProvider` (TanStack Query)
 - **`App.tsx`** — route definitions; all routes render inside `<Layout>`
 - **`components/layout/`** — `Sidebar` (nav links), `Topbar` (page title + API health dot), `Layout` (wraps `<Outlet>`)
-- **`pages/`** — one file per route; `DashboardPage` polls `/health` via `useHealthCheck`
+- **`pages/`** — one file per route; `DashboardPage` polls `/health` via `useHealthCheck` and shows `AdapterHealthWidget` (groups servers by `adapter_type`, live health badges)
 - **`hooks/`** — React Query hooks that wrap Axios calls to `/api/*`
 
 Tailwind utility classes are in `index.css` under `@layer components` (`.card`, `.badge-healthy`, etc.). Use these rather than repeating the same class strings.
@@ -133,14 +135,21 @@ Key `.env` variables (see `.env.example` for full list):
 - `REDIS_URL` — used for rate limiting and pub/sub
 - `ENVIRONMENT` — `development` | `test` | `production` (disables `/docs` and `/redoc` in production)
 - `DEBUG=true` — enables SQLAlchemy query logging
+- `ANTHROPIC_API_KEY` — required by the KB service for the RAG generation step (`POST /query`)
+- `GITHUB_TOKEN` — env var name stored in `auth_config.token_env_var` for the GitHub server row
+- `SLACK_BOT_TOKEN` — same pattern for Slack
+- `GOOGLE_ACCESS_TOKEN` — same pattern for Google Drive
 
-### Adapter Layer (Week 3)
+### Adapter Layer (Week 3-4)
 
 Files live in `services/adapters/`:
 - **`base.py`** — `BaseAdapter` ABC + `ToolResult` TypedDict. `invoke_tool(server, tool_name, arguments, db, actor)` handles timing, credential injection, AuditLog write (`db.flush()`), and EMA latency update on `ServerCapability.avg_latency_ms`. Subclasses implement `_execute_tool` and `_get_tool_definitions` only.
 - **`credentials.py`** — `resolve_credentials(server) → dict[str, str]`. Reads `auth_config["token_env_var"]` from the server row, fetches the value from `os.environ`, returns an HTTP headers dict. Raises `CredentialResolutionError` (→ 503) if misconfigured — never reads raw tokens from the DB.
 - **`github.py`** — `GitHubAdapter`: wraps GitHub REST API v3. 6 tools: `list_repos`, `get_pr`, `list_prs`, `get_issue`, `list_issues`, `get_file_contents`. Each normalizes the GitHub response (drops `node_id`, `performed_via_github_app`, etc.).
-- **`registry.py`** — `get_adapter(server) → BaseAdapter`. Dispatches on `server.metadata_["adapter_type"]`. Raises `AdapterNotFoundError` (→ 503) for unknown types. Add Week 4 adapters here: `"slack": SlackAdapter()`, `"gdrive": GoogleDriveAdapter()`.
+- **`slack.py`** — `SlackAdapter`: wraps Slack Web API. 5 tools: `list_channels`, `get_channel_history`, `post_message`, `get_user_info`, `search_messages`. Slack's error model returns `ok: false` in a 200 response — `_slack_request` checks `data["ok"]` not just status code.
+- **`gdrive.py`** — `GoogleDriveAdapter`: wraps Google Drive REST API v3. 5 tools: `list_files`, `get_file_metadata`, `download_file`, `search_files`, `list_shared_drives`. Two request helpers: `_gdrive_request` (JSON) and `_gdrive_download` (binary/text with `follow_redirects=True`). Base URL is hardcoded to `https://www.googleapis.com/drive/v3` — `server.base_url` is only used by the health scheduler for this adapter.
+- **`kb.py`** — `KnowledgeBaseAdapter`: wraps the `apps/kb` RAG service. 5 tools: `query` (full RAG — retrieve + Claude generation), `search` (semantic retrieval only), `add_document`, `list_documents`, `delete_document`. Uses `server.base_url` for all requests (protocol-agnostic, works with any REST vector store).
+- **`registry.py`** — `get_adapter(server) → BaseAdapter`. Dispatches on `server.metadata_["adapter_type"]`. Current registry: `{"github": GitHubAdapter(), "slack": SlackAdapter(), "gdrive": GoogleDriveAdapter(), "kb": KnowledgeBaseAdapter()}`. Raises `AdapterNotFoundError` (→ 503) for unknown types.
 
 Tool invocation endpoint: `POST /tools/invoke` (`routers/tools.py`)
 - Body: `{server_id, tool_name, arguments, actor?}`
@@ -153,7 +162,31 @@ Registering a server for a specific adapter — set `metadata.adapter_type` at r
 {"metadata": {"adapter_type": "github"}, "auth_config": {"token_env_var": "GITHUB_TOKEN"}}
 ```
 
-Frontend hooks: `useUpdateServer()` (PATCH auth_config), `useInvokeTool()` (POST /tools/invoke). `AuthConfigPanel` component in `RegistryPage` shows token source and allows editing the env var name.
+Frontend hooks: `useUpdateServer()` (PATCH auth_config), `useInvokeTool()` (POST /tools/invoke). `AuthConfigPanel` component in `RegistryPage` shows `token_env_var` from `server.auth_config` and allows editing it. `RegistryPage` also has an adapter type dropdown on the registration form.
+
+### Knowledge Base RAG Service (`apps/kb/`)
+
+Standalone FastAPI microservice — runs as its own Docker container (`mcp_kb`, port 8001).
+
+**RAG pipeline:**
+1. **Ingestion** (`POST /documents`) — document text is encoded into a 384-dim vector using `sentence-transformers/all-MiniLM-L6-v2`. Stored in an in-memory numpy matrix `(n_docs, 384)`.
+2. **Retrieval** (`POST /search`) — query is encoded with the same model; cosine similarity ranks all documents. Returns semantically similar chunks even when query words don't appear in the document.
+3. **Generation** (`POST /query`) — retrieves top-k chunks, passes them as context to Claude Haiku via the Anthropic SDK, returns `{answer, sources, question}`. This is the endpoint LangGraph will call.
+
+**Embedding model choice — `all-MiniLM-L6-v2`:**
+- 22 MB, fast CPU inference — no GPU needed
+- Pre-downloaded into the Docker image at build time (no cold-start delay)
+- Swappable to OpenAI `text-embedding-3-small` by replacing the two `.encode()` calls in `main.py` — the rest of the pipeline (cosine similarity, numpy, Claude generation) is unchanged
+
+**Endpoints:**
+- `GET /` and `GET /health` — both return `{status, documents}` (health scheduler probes `/` — must return 200)
+- `POST /search` — semantic retrieval, returns ranked chunks with scores
+- `POST /query` — full RAG, requires `ANTHROPIC_API_KEY`
+- `POST /documents` (201) — add + index a document
+- `GET /documents` — paginated list
+- `DELETE /documents/{id}` (200) — remove a document, returns `{"deleted": id}`
+
+**In-memory store limitation:** documents are lost on container restart. Upgrade path: `pgvector` Postgres extension (already in the stack) to persist embeddings.
 
 ### Registry API (Week 2)
 
@@ -166,15 +199,16 @@ Endpoints under `/registry/`:
 - `PUT /registry/servers/{id}/capabilities` — replace entire capability set
 - `GET /registry/tools` — cross-server tool search by `name` (ilike) and `permission`
 
-The health-check scheduler (`services/health_scheduler.py`) runs every 60 s as an asyncio background task. It is **not started** when `ENVIRONMENT=test`. It probes each active server's `base_url` via HTTP GET, marks `healthy` / `degraded` / `unhealthy`, and busts the Redis cache.
+The health-check scheduler (`services/health_scheduler.py`) runs every 60 s as an asyncio background task. It is **not started** when `ENVIRONMENT=test`. It probes each active server's `base_url` via `GET` (no auth), marks `healthy` / `degraded` / `unhealthy`, and busts the Redis cache.
 
 ### Testing
 
 - `client` fixture — no DB override; used for health tests
 - `db_session` fixture — function-scoped; creates its own engine connection per test, commits are allowed, cleans up known test server names in teardown. Skips automatically when Postgres is unreachable.
 - `registry_client` fixture — `AsyncClient` with `get_db` overridden to use the test session; requires Postgres
-- `test_adapters.py` — unit tests only (no DB, mock httpx via `patch`)
-- `test_tools_router.py` — integration tests for `POST /tools/invoke`; mocks `_gh_request` so no real GitHub calls
+- `test_adapters.py` — unit tests only (no DB); mocks `_gh_request`, `_slack_request`, `_gdrive_request`, `_gdrive_download`, `_kb_request` via `patch(..., new_callable=AsyncMock)`. 41 tests covering all 4 adapters + dispatch.
+- `test_tools_router.py` — 16 integration tests for `POST /tools/invoke` covering GitHub, Slack, GDrive, KB (including `query` tool), credential error → 503, upstream error → 502.
+- `_TEST_SERVER_NAMES` in `conftest.py` controls teardown cleanup — **test server names must never match live production server names**. Registry tests use `github-mcp-reg-test` / `slack-mcp-reg-test`; tools router tests use `github-mcp-test`, `slack-mcp-test`, etc. Live servers are `github-mcp`, `slack-mcp`, `gdrive-mcp`, `kb-mcp`.
 - **Do not use `join_transaction_mode="create_savepoint"`** with asyncpg — it causes `InterfaceError: cannot perform operation: another operation is in progress` when multiple requests share the same connection. Use per-test engines instead (current pattern).
 
 ## Known Gotchas
@@ -183,7 +217,7 @@ These have already bitten us — don't repeat them:
 
 - **`CORS_ORIGINS` must be JSON in `.env`** — pydantic-settings v2 runs `json.loads()` on `list[str]` fields *before* any validator runs. A comma-separated string causes a `SettingsError` at startup. Always use: `CORS_ORIGINS=["http://localhost:5173","http://localhost:3000"]`
 
-- **Docker inter-container networking uses service names** — inside Docker Compose, `localhost` resolves to the container itself. Use the Compose service name: `http://api:8000`, `postgresql+asyncpg://mcp_user:mcp_password@postgres:5432/mcp_gateway`, `redis://redis:6379/0`. The `DATABASE_URL` and `REDIS_URL` overrides in `docker-compose.yml` already handle this for the API; don't change them to `localhost`.
+- **Docker inter-container networking uses service names** — inside Docker Compose, `localhost` resolves to the container itself. Use the Compose service name: `http://api:8000`, `http://kb:8001`, `postgresql+asyncpg://mcp_user:mcp_password@postgres:5432/mcp_gateway`, `redis://redis:6379/0`. The `DATABASE_URL` and `REDIS_URL` overrides in `docker-compose.yml` already handle this for the API; don't change them to `localhost`.
 
 - **Editable install needs `src/` to exist** — the API Dockerfile creates a stub `src/mcp_gateway/__init__.py` before running `pip install -e ".[dev]"` so setuptools can resolve the package root. The real source is copied/mounted afterwards. Do not remove this step.
 
@@ -208,6 +242,18 @@ These have already bitten us — don't repeat them:
 - **`npm install` must be run from the monorepo root, not `apps/web/`** — the repo uses npm workspaces; running `npm install` in `apps/web/` alone will not hoist `@tanstack/react-query` and other shared packages to `node_modules/` where the TypeScript server can find them. Always run `npm install` from `/MCP-Gateway/`.
 
 - **`docker-compose.yml` volume mounts `tests/` alongside `src/`** — both `./apps/api/src:/app/src` and `./apps/api/tests:/app/tests` are mounted so test file edits are reflected in the container without a rebuild. If you add a new top-level directory under `apps/api/` that needs to be live-reloaded, add a corresponding volume entry.
+
+- **`docker compose restart` does not reload `env_file`** — changes to `.env` are not picked up by `restart`. Use `docker compose up -d --force-recreate <service>` to reload environment variables.
+
+- **KB service needs `GET /` for the health scheduler** — the health scheduler probes `server.base_url` with a plain `GET` (no path). If `base_url` is `http://kb:8001`, that hits `/` which must return 200. The KB service registers both `GET /` and `GET /health` on the same handler. Do not remove the root route.
+
+- **FastAPI 0.115.0 + `status_code=204` cannot return a body** — endpoints declared with `status_code=204` raise `AssertionError` if they return any content. Use `status_code=200` and return a dict instead (e.g. `{"deleted": id}`).
+
+- **Test server names must not match live production server names** — `conftest.py` teardown deletes all servers whose names are in `_TEST_SERVER_NAMES`. If a test fixture uses `"github-mcp"` as its server name and that name is in the cleanup list, running the test suite will wipe the live registered server. Registry tests use `github-mcp-reg-test` / `slack-mcp-reg-test`; live servers use `github-mcp` / `slack-mcp` / `gdrive-mcp` / `kb-mcp`.
+
+- **`ServerResponse` must include `auth_config`** — the frontend `AuthConfigPanel` reads `server.auth_config?.token_env_var` to display the token source. If `auth_config` is missing from the schema, the UI always shows "not configured" regardless of what is stored. `auth_config` is included in `ServerResponse` in `schemas/registry.py`.
+
+- **Google Drive `base_url` is only used by the health scheduler** — `GoogleDriveAdapter` hardcodes `GDRIVE_API_BASE = "https://www.googleapis.com/drive/v3"` for all tool calls. The `server.base_url` field for a gdrive server is only probed by the health scheduler. Set it to `https://www.googleapis.com/discovery/v1/apis` (returns 200 publicly) so the server shows healthy.
 
 ## CI
 
