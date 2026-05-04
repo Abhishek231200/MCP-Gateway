@@ -2,11 +2,16 @@
 
 from mcp_gateway.models.registry import McpServer
 from mcp_gateway.services.adapters.base import AdapterNotFoundError, BaseAdapter
+from mcp_gateway.services.adapters.gdrive import GoogleDriveAdapter
 from mcp_gateway.services.adapters.github import GitHubAdapter
+from mcp_gateway.services.adapters.kb import KnowledgeBaseAdapter
+from mcp_gateway.services.adapters.slack import SlackAdapter
 
 _REGISTRY: dict[str, BaseAdapter] = {
     "github": GitHubAdapter(),
-    # Week 4: "slack": SlackAdapter(), "gdrive": GoogleDriveAdapter(), "kb": KnowledgeBaseAdapter()
+    "slack": SlackAdapter(),
+    "gdrive": GoogleDriveAdapter(),
+    "kb": KnowledgeBaseAdapter(),
 }
 
 

@@ -22,6 +22,22 @@ const AUTH_LABELS: Record<string, string> = {
   jwt: "JWT",
 };
 
+const ADAPTER_LABELS: Record<string, string> = {
+  github: "GitHub",
+  slack: "Slack",
+  gdrive: "Google Drive",
+  kb: "Knowledge Base",
+};
+
+function AdapterBadge({ adapterType }: { adapterType: string }) {
+  const label = ADAPTER_LABELS[adapterType] ?? adapterType;
+  return (
+    <span className="text-xs font-mono bg-gray-800 border border-gray-700 text-gray-400 rounded px-1.5 py-0.5">
+      {label}
+    </span>
+  );
+}
+
 function HealthBadge({ status }: { status: string }) {
   const cls =
     status === "healthy"
@@ -173,6 +189,9 @@ function ServerCard({ server }: { server: McpServer }) {
             <span className="text-xs text-gray-600 border border-gray-700 rounded px-1.5 py-0.5">
               v{server.version}
             </span>
+            {typeof server.metadata?.adapter_type === "string" && (
+              <AdapterBadge adapterType={server.metadata.adapter_type} />
+            )}
           </div>
           <p className="text-sm text-gray-400 mt-1 truncate" title={server.base_url}>
             {server.base_url}
@@ -247,25 +266,35 @@ function ServerCard({ server }: { server: McpServer }) {
 
 // ── Register form ─────────────────────────────────────────────────────────────
 
-const EMPTY: RegisterServerPayload = {
+interface RegisterFormState extends RegisterServerPayload {
+  adapter_type: string;
+}
+
+const EMPTY: RegisterFormState = {
   name: "",
   display_name: "",
   base_url: "",
   auth_type: "none",
   description: "",
+  adapter_type: "",
 };
 
 function RegisterForm({ onClose }: { onClose: () => void }) {
-  const [form, setForm] = useState<RegisterServerPayload>(EMPTY);
+  const [form, setForm] = useState<RegisterFormState>(EMPTY);
   const register = useRegisterServer();
 
-  const field = (key: keyof RegisterServerPayload) => (
+  const field = (key: keyof RegisterFormState) => (
     e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>
   ) => setForm((f) => ({ ...f, [key]: e.target.value }));
 
   const onSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const payload = { ...form, description: form.description || undefined };
+    const { adapter_type, description, ...rest } = form;
+    const payload: RegisterServerPayload = {
+      ...rest,
+      description: description || undefined,
+      metadata: adapter_type ? { adapter_type } : undefined,
+    };
     register.mutate(payload, { onSuccess: onClose });
   };
 
@@ -328,6 +357,21 @@ function RegisterForm({ onClose }: { onClose: () => void }) {
             <option value="jwt">JWT</option>
           </select>
         </div>
+      </div>
+
+      <div>
+        <label className={label}>Adapter Type</label>
+        <select
+          className={input}
+          value={form.adapter_type}
+          onChange={field("adapter_type")}
+        >
+          <option value="">— none / custom —</option>
+          <option value="github">GitHub</option>
+          <option value="slack">Slack</option>
+          <option value="gdrive">Google Drive</option>
+          <option value="kb">Knowledge Base (RAG)</option>
+        </select>
       </div>
 
       <div>

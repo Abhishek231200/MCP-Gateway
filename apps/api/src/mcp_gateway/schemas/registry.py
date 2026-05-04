@@ -65,6 +65,7 @@ class ServerResponse(BaseModel):
     base_url: str
     version: str
     auth_type: AuthType
+    auth_config: dict[str, Any] = Field(default_factory=dict)
     health_status: HealthStatus
     last_health_check: datetime | None
     is_active: bool

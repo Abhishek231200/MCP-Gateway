@@ -67,6 +67,23 @@ services:
       retries: 3
       start_period: 30s
 
+  # ─── Knowledge Base (RAG) ───────────────────────────────────────────────────
+  kb:
+    build:
+      context: ./apps/kb
+    container_name: mcp_kb
+    restart: unless-stopped
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    ports:
+      - "8001:8001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
   # ─── React Frontend ─────────────────────────────────────────────────────────
   web:
     build:

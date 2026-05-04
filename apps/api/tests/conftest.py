@@ -24,9 +24,13 @@ async def client() -> AsyncClient:
 # Names used by test data — cleaned up after each test
 _TEST_SERVER_NAMES = (
     "github-mcp-test",
+    "github-mcp-reg-test",
     "bare-server-test",
-    "github-mcp",
-    "slack-mcp",
+    "slack-mcp-reg-test",
+    "slack-mcp-test",
+    "slack-no-creds-test",
+    "gdrive-mcp-test",
+    "kb-mcp-test",
 )
 
 
