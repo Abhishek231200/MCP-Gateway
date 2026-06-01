@@ -52,3 +52,10 @@ logs/
 # Docker volumes (local)
 postgres_data/
 redis_data/
+
+# Service account keys and credentials
+*_key.json
+*-key.json
+service_account*.json
+credentials.json
+tokens.txt

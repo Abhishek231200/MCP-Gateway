@@ -1,6 +1,7 @@
 import { Activity, Server, GitBranch, ShieldAlert } from "lucide-react";
 import { useHealthCheck } from "@/hooks/useHealthCheck";
 import { useServers } from "@/hooks/useRegistry";
+import { useWorkflows } from "@/hooks/useWorkflows";
 import type { McpServer } from "@/hooks/useRegistry";
 
 interface StatCardProps {
@@ -154,6 +155,18 @@ function AdapterHealthWidget() {
 export default function DashboardPage() {
   const { data: health, isLoading } = useHealthCheck();
   const { data: registry } = useServers();
+  const { data: workflowsData } = useWorkflows(100);
+
+  const todayMs = 24 * 60 * 60 * 1000;
+
+  const workflowsToday = workflowsData?.items.filter((wf) =>
+    Date.now() - new Date(wf.created_at).getTime() < todayMs
+  ).length ?? "—";
+
+  const toolCallsToday = workflowsData?.items.reduce((total, wf) => {
+    if (Date.now() - new Date(wf.created_at).getTime() >= todayMs) return total;
+    return total + wf.steps.length;
+  }, 0) ?? "—";
 
   return (
     <div className="space-y-6">
@@ -174,13 +187,13 @@ export default function DashboardPage() {
         />
         <StatCard
           label="Workflows Today"
-          value="—"
+          value={workflowsToday}
           icon={GitBranch}
           description="Workflow executions in last 24h"
         />
         <StatCard
           label="Tool Calls"
-          value="—"
+          value={toolCallsToday}
           icon={Activity}
           description="Total tool invocations today"
         />

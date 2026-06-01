@@ -236,12 +236,23 @@ class GitHubAdapter(BaseAdapter):
         data = await _gh_request("GET", path, headers, params={"per_page": per_page})
         return [_normalize_repo(r) for r in data]
 
+    @staticmethod
+    def _require(args: dict[str, Any], *keys: str) -> None:
+        missing = [k for k in keys if k not in args or args[k] is None]
+        if missing:
+            raise AdapterError(
+                f"Missing required argument(s): {', '.join(missing)}. "
+                f"These must be provided explicitly — they cannot be inferred from prior steps."
+            )
+
     async def _get_pr(self, args: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
+        self._require(args, "owner", "repo", "number")
         owner, repo, number = args["owner"], args["repo"], args["number"]
         data = await _gh_request("GET", f"/repos/{owner}/{repo}/pulls/{number}", headers)
         return _normalize_pr(data)
 
     async def _list_prs(self, args: dict[str, Any], headers: dict[str, str]) -> list[dict[str, Any]]:
+        self._require(args, "owner", "repo")
         owner, repo = args["owner"], args["repo"]
         state = args.get("state", "open")
         per_page = args.get("per_page", 30)
@@ -252,11 +263,13 @@ class GitHubAdapter(BaseAdapter):
         return [_normalize_pr(pr) for pr in data]
 
     async def _get_issue(self, args: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
+        self._require(args, "owner", "repo", "number")
         owner, repo, number = args["owner"], args["repo"], args["number"]
         data = await _gh_request("GET", f"/repos/{owner}/{repo}/issues/{number}", headers)
         return _normalize_issue(data)
 
     async def _list_issues(self, args: dict[str, Any], headers: dict[str, str]) -> list[dict[str, Any]]:
+        self._require(args, "owner", "repo")
         owner, repo = args["owner"], args["repo"]
         state = args.get("state", "open")
         per_page = args.get("per_page", 30)
@@ -268,6 +281,7 @@ class GitHubAdapter(BaseAdapter):
         return [_normalize_issue(i) for i in data if "pull_request" not in i]
 
     async def _get_file_contents(self, args: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
+        self._require(args, "owner", "repo", "path")
         owner, repo, path = args["owner"], args["repo"], args["path"]
         params = {}
         if ref := args.get("ref"):

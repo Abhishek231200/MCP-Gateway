@@ -132,10 +132,10 @@ The Vite dev server proxies `/api/*` → `http://localhost:8000`, stripping the 
 
 Key `.env` variables (see `.env.example` for full list):
 - `DATABASE_URL` — asyncpg URL; automatically overridden in Docker Compose to point at the `postgres` service
-- `REDIS_URL` — used for rate limiting and pub/sub
+- `REDIS_URL` — used for rate limiting, pub/sub, and workflow event streaming
 - `ENVIRONMENT` — `development` | `test` | `production` (disables `/docs` and `/redoc` in production)
 - `DEBUG=true` — enables SQLAlchemy query logging
-- `ANTHROPIC_API_KEY` — required by the KB service for the RAG generation step (`POST /query`)
+- `ANTHROPIC_API_KEY` — required by **both** the KB RAG service and the workflow orchestrator (planner + reviewer Claude calls)
 - `GITHUB_TOKEN` — env var name stored in `auth_config.token_env_var` for the GitHub server row
 - `SLACK_BOT_TOKEN` — same pattern for Slack
 - `GOOGLE_ACCESS_TOKEN` — same pattern for Google Drive
@@ -187,6 +187,59 @@ Standalone FastAPI microservice — runs as its own Docker container (`mcp_kb`, 
 - `DELETE /documents/{id}` (200) — remove a document, returns `{"deleted": id}`
 
 **In-memory store limitation:** documents are lost on container restart. Upgrade path: `pgvector` Postgres extension (already in the stack) to persist embeddings.
+
+### Agent Orchestrator (Week 5)
+
+Files in `services/orchestrator.py` and `routers/workflows.py`.
+
+**LangGraph state machine** — `WorkflowOrchestrator` wraps a compiled `StateGraph(WorkflowState)`:
+
+```
+START → planner → executor → reviewer → END
+                                │
+                                └─(insufficient, replan_count < MAX_REPLANS=1)──► planner
+```
+
+**`WorkflowState` TypedDict fields:**
+- `workflow_id`, `task`, `actor` — identity
+- `available_tools` — fetched from registry at run start (all active server capabilities)
+- `plan` — planner output: `[{step_order, server_name, tool_name, arguments, reasoning}]`
+- `step_results` — executor output: `[{step_order, server_name, tool_name, result, latency_ms, error}]`
+- `replan_count` — number of replanning attempts so far
+- `final_answer` / `error` — terminal signals
+
+**Node responsibilities:**
+- **Planner** — formats the full tool manifest (`server_name + tool_name + input_schema`) into a prompt, calls Claude Haiku to produce a JSON plan, validates steps against the registry, creates `WorkflowStep` DB rows, publishes `plan_ready` event. Appends previous failure context on replan.
+- **Executor** — iterates steps, calls `get_adapter(server).invoke_tool(...)` for each, updates `WorkflowStep` rows to RUNNING/COMPLETED/FAILED, publishes per-step events. Failures are captured (not raised) so the reviewer can decide what to do.
+- **Reviewer** — summarises results, calls Claude Haiku to judge sufficiency, synthesises final answer. On success: marks Workflow COMPLETED, publishes `workflow_completed`. On failure with budget: increments `replan_count`, publishes `replanning`. On exhausted budget: marks FAILED.
+- **Router** — `_reviewer_router(state)` returns `"planner"` (replan) or `END` (terminal).
+
+**Background execution pattern:**
+- `POST /workflows` commits the Workflow record then calls `asyncio.create_task(_run_workflow_background(...))`.
+- The background task creates its **own** `AsyncSessionLocal()` session — never shares the request session.
+- The orchestrator uses `db.flush()` (not `db.commit()`) throughout; the background task commits at the end.
+
+**WebSocket event streaming** (`WS /workflows/{id}/stream`):
+- Events published to Redis channel `workflow:{id}:events` via `r.publish()`.
+- WebSocket handler subscribes to the channel and forwards JSON events to the browser.
+- Two concurrent asyncio tasks: `_forward_events` (Redis → WS) and `_watch_disconnect` (detect client close). First to finish cancels the other. 5-minute hard timeout.
+- If workflow is already terminal at connection time, synthetic terminal event is returned immediately.
+
+**Event types**: `status_change`, `plan_ready`, `step_started`, `step_completed`, `step_failed`, `review_started`, `replanning`, `workflow_completed`, `workflow_failed`.
+
+**Endpoints:**
+- `POST /workflows` (201) — create + start async execution
+- `GET /workflows` — paginated list (most recent first)
+- `GET /workflows/{id}` — detail + steps
+- `WS /workflows/{id}/stream` — live event stream
+
+**Frontend hooks** (`hooks/useWorkflows.ts`):
+- `useWorkflows(limit)` — polls list every 5 s
+- `useWorkflow(id)` — polls detail every 3 s; stops polling on terminal status
+- `useCreateWorkflow()` — POST mutation
+- `useWorkflowStream(workflowId)` — opens WS, collects events into `events[]`, closes on terminal event
+
+**`WorkflowsPage.tsx`** — two-panel layout: left has the submit textarea + workflow list; right has the selected workflow's step timeline + live event log + final answer.
 
 ### Registry API (Week 2)
 
@@ -254,6 +307,20 @@ These have already bitten us — don't repeat them:
 - **`ServerResponse` must include `auth_config`** — the frontend `AuthConfigPanel` reads `server.auth_config?.token_env_var` to display the token source. If `auth_config` is missing from the schema, the UI always shows "not configured" regardless of what is stored. `auth_config` is included in `ServerResponse` in `schemas/registry.py`.
 
 - **Google Drive `base_url` is only used by the health scheduler** — `GoogleDriveAdapter` hardcodes `GDRIVE_API_BASE = "https://www.googleapis.com/drive/v3"` for all tool calls. The `server.base_url` field for a gdrive server is only probed by the health scheduler. Set it to `https://www.googleapis.com/discovery/v1/apis` (returns 200 publicly) so the server shows healthy.
+
+- **Background orchestrator task must use its own DB session** — the `asyncio.create_task(_run_workflow_background(...))` function creates a fresh `async with AsyncSessionLocal() as db:` session. It must NOT share the request-scoped session from `get_db`, which will be committed and closed after the response is sent. Sharing sessions across tasks causes `MissingGreenlet` or use-after-close errors.
+
+- **Commit before scheduling the background task** — the create endpoint calls `await db.commit()` explicitly before `asyncio.create_task(...)`. Otherwise the background task's session may try to fetch the workflow record before it is committed, finding nothing.
+
+- **LangGraph node functions return partial state updates, not full state** — each node returns only the dict keys it modifies. LangGraph merges these into the full state. Returning the full state would overwrite fields other nodes set.
+
+- **Use `anthropic.AsyncAnthropic`, not `anthropic.Anthropic`** — the orchestrator runs in an async FastAPI context. Using the sync `anthropic.Anthropic` client in an async function blocks the event loop during the HTTP call to Claude. Always use `await client.messages.create(...)` with `AsyncAnthropic`.
+
+- **Vite WS proxy requires `ws: true`** — the Vite dev server won't proxy WebSocket upgrade requests unless `ws: true` is set on the proxy entry. Without it, `ws://localhost:5173/api/workflows/{id}/stream` gets a 426 error. The config at `apps/web/vite.config.ts` has this set.
+
+- **Test teardown cleans up workflow rows** — `conftest.py` deletes `workflows WHERE initiated_by IN ('test', 'test-user', 'test-orchestrator')` before server cleanup. Workflows cascade-delete `workflow_steps`. Always use one of those actor names in workflow tests; never use live production actor names.
+
+- **`db.execute()` + `scalar_one_or_none()` chain** — in the orchestrator, `await self._db.execute(select(Workflow)...)` returns a `Result` object; call `.scalar_one_or_none()` on it synchronously. The `await` is only on `execute`, not on the scalar accessor.
 
 ## CI
 

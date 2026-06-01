@@ -21,6 +21,9 @@ async def client() -> AsyncClient:
 
 # ── DB fixtures for integration tests ─────────────────────────────────────────
 
+# Workflow actors used by tests — cleaned up after each test
+_TEST_WORKFLOW_ACTORS = ("test", "test-user", "test-orchestrator")
+
 # Names used by test data — cleaned up after each test
 _TEST_SERVER_NAMES = (
     "github-mcp-test",
@@ -72,6 +75,11 @@ async def db_session():
         # Best-effort cleanup of test rows
         try:
             names_tuple = ", ".join(f"'{n}'" for n in _TEST_SERVER_NAMES)
+            actors_tuple = ", ".join(f"'{a}'" for a in _TEST_WORKFLOW_ACTORS)
+            # Workflows first (FK cascade removes workflow_steps)
+            await session.execute(
+                text(f"DELETE FROM workflows WHERE initiated_by IN ({actors_tuple})")
+            )
             await session.execute(
                 text(f"DELETE FROM audit_logs WHERE server_name IN ({names_tuple})")
             )

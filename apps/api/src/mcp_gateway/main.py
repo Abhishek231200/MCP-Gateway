@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from mcp_gateway.config import settings
-from mcp_gateway.routers import health, registry, tools
+from mcp_gateway.routers import health, registry, tools, workflows
 
 # ─── Logging setup ────────────────────────────────────────────────────────────
 logging.basicConfig(level=settings.log_level.upper())
@@ -31,9 +31,37 @@ logger = structlog.get_logger()
 
 # ─── Lifespan ─────────────────────────────────────────────────────────────────
 
+async def _recover_interrupted_workflows() -> None:
+    """Mark any workflows stuck in non-terminal states as failed.
+
+    These are left behind when the server restarts while a background task is running.
+    """
+    from datetime import UTC, datetime
+    from sqlalchemy import update
+    from mcp_gateway.database import AsyncSessionLocal
+    from mcp_gateway.models.workflow import Workflow, WorkflowStatus
+
+    interrupted = {WorkflowStatus.PENDING, WorkflowStatus.PLANNING, WorkflowStatus.RUNNING}
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            update(Workflow)
+            .where(Workflow.status.in_(interrupted))
+            .values(
+                status=WorkflowStatus.FAILED,
+                error_message="Interrupted by server restart.",
+                completed_at=datetime.now(UTC),
+            )
+        )
+        await db.commit()
+    logger.info("startup.recovered_interrupted_workflows")
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("MCP Gateway starting", environment=settings.environment)
+
+    if settings.environment != "test":
+        await _recover_interrupted_workflows()
 
     scheduler_task: asyncio.Task[None] | None = None
     if settings.environment != "test":
@@ -72,6 +100,7 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(registry.router)
     app.include_router(tools.router)
+    app.include_router(workflows.router)
 
     return app
 

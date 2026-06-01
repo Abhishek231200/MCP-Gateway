@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     redis_url: str = Field(default="redis://localhost:6379/0")
 
     # LLM providers
+    anthropic_api_key: str = Field(default="")
     groq_api_key: str = Field(default="")
     openai_api_key: str = Field(default="")
 

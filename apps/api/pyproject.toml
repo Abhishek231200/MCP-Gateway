@@ -26,6 +26,10 @@ dependencies = [
     "structlog>=24.4.0",
     # WebSockets
     "websockets>=13.1",
+    # LLM / orchestration
+    "anthropic>=0.40.0",
+    "openai>=1.0.0",
+    "langgraph>=0.2.0",
 ]
 
 [project.optional-dependencies]
