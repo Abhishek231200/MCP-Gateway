@@ -14,7 +14,7 @@ import os
 import uuid
 from typing import Any
 
-import anthropic
+import openai
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -86,7 +86,7 @@ class QueryRequest(BaseModel):
     question: str
     top_k: int = 5
     min_score: float = 0.1
-    model: str = "claude-haiku-4-5-20251001"
+    model: str = "gpt-4o-mini"
 
 
 class AddDocumentRequest(BaseModel):
@@ -111,10 +111,10 @@ def search(req: SearchRequest) -> list[dict[str, Any]]:
 
 @app.post("/query")
 def query(req: QueryRequest) -> dict[str, Any]:
-    """Full RAG: retrieve relevant chunks then generate a grounded answer via Claude."""
-    api_key = os.getenv("ANTHROPIC_API_KEY")
+    """Full RAG: retrieve relevant chunks then generate a grounded answer via OpenAI."""
+    api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured")
+        raise HTTPException(status_code=503, detail="OPENAI_API_KEY not configured")
 
     chunks = _semantic_search(req.question, req.top_k, req.min_score)
 
@@ -130,8 +130,8 @@ def query(req: QueryRequest) -> dict[str, Any]:
         for i, c in enumerate(chunks)
     )
 
-    client = anthropic.Anthropic(api_key=api_key)
-    message = client.messages.create(
+    client = openai.OpenAI(api_key=api_key)
+    response = client.chat.completions.create(
         model=req.model,
         max_tokens=1024,
         messages=[{
@@ -146,7 +146,7 @@ def query(req: QueryRequest) -> dict[str, Any]:
     )
 
     return {
-        "answer": message.content[0].text,
+        "answer": response.choices[0].message.content,
         "sources": [{"id": c["id"], "title": c["title"], "score": c["score"]} for c in chunks],
         "question": req.question,
     }

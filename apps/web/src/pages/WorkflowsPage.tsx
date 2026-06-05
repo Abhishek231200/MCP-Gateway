@@ -63,6 +63,7 @@ function eventLabel(event: StreamEvent): string {
     case "step_started":         return `Step ${event.step} started: ${event.server}.${event.tool}`;
     case "step_completed":       return `Step ${event.step} completed (${event.latency_ms}ms)`;
     case "step_failed":          return `Step ${event.step} failed: ${event.error}`;
+    case "step_denied":          return `Step ${event.step} denied by policy (${event.actor_role}): ${event.reason}`;
     case "step_skipped":         return `Step ${event.step} skipped — ${event.reason}`;
     case "step_retry":           return `Step ${event.step} retrying (attempt ${event.attempt}/${event.max_retries}, backoff ${event.backoff_seconds}s)`;
     case "checkpoint_reached":   return `Checkpoint: approval required for step ${event.step} (${event.server}.${event.tool})`;
@@ -78,7 +79,7 @@ function eventLabel(event: StreamEvent): string {
 
 function eventColor(event: StreamEvent): string {
   if (event.type === "workflow_completed" || event.type === "step_completed" || event.type === "checkpoint_approved") return "text-emerald-400";
-  if (event.type === "workflow_failed" || event.type === "step_failed" || event.type === "checkpoint_rejected")       return "text-red-400";
+  if (event.type === "workflow_failed" || event.type === "step_failed" || event.type === "checkpoint_rejected" || event.type === "step_denied") return "text-red-400";
   if (event.type === "checkpoint_reached")                                                                            return "text-orange-300";
   if (event.type === "step_skipped")                                                                                  return "text-gray-500";
   if (event.type === "step_retry")                                                                                    return "text-yellow-400";

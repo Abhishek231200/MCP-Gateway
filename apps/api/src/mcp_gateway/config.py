@@ -39,6 +39,14 @@ class Settings(BaseSettings):
     groq_api_key: str = Field(default="")
     openai_api_key: str = Field(default="")
 
+    # Security gateway (OPA)
+    opa_url: str = Field(default="http://localhost:8181")
+    # Maps actor name → role: "admin" | "engineer" | "viewer"
+    actor_roles: dict[str, str] = Field(default={"system": "admin"})
+
+    # API key auth: maps key string → {"actor": "...", "role": "..."}
+    api_keys: dict[str, dict[str, str]] = Field(default={})
+
     @property
     def is_production(self) -> bool:
         return self.environment == "production"

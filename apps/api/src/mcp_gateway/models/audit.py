@@ -78,6 +78,11 @@ class AuditLog(Base):
         index=True,
     )
 
+    # Tamper-evident hash chain
+    # entry_hash = SHA-256(id|action|actor|server|tool|created_at|prev_hash)
+    entry_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    prev_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     def __repr__(self) -> str:
         return (
             f"<AuditLog action={self.action} actor={self.actor!r} "

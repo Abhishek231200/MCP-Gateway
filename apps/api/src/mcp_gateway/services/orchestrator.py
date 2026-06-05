@@ -26,10 +26,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing_extensions import TypedDict
 
 from mcp_gateway.config import settings
+from mcp_gateway.models.audit import AuditAction
 from mcp_gateway.models.workflow import StepStatus, Workflow, WorkflowStatus, WorkflowStep
 from mcp_gateway.services.adapters import AdapterError, AdapterNotFoundError, get_adapter
+from mcp_gateway.services.adapters.base import write_audit_log
 from mcp_gateway.services.adapters.credentials import CredentialResolutionError
 from mcp_gateway.services.registry import get_server_by_name, list_tools
+from mcp_gateway.services.security_gateway import get_security_gateway
 
 logger = structlog.get_logger()
 
@@ -364,16 +367,77 @@ class WorkflowOrchestrator:
                                 step=step_order, reason=reason)
                     continue
 
-            # ── Human-in-the-loop: check if approval required ─────────────────
+            # ── Resolve tool definition and permission ────────────────────────
             tool_def = next(
                 (t for t in state["available_tools"]
                  if t["server_name"] == server_name and t["tool_name"] == tool_name),
                 None,
             )
+            required_permission = (
+                tool_def.get("required_permission", "read") if tool_def else "read"
+            )
+
+            # ── Security gateway: OPA policy evaluation ───────────────────────
+            gw = get_security_gateway()
+            decision = await gw.evaluate(
+                actor=state["actor"],
+                server_name=server_name,
+                tool_name=tool_name,
+                required_permission=required_permission,
+            )
+            if not decision.allow:
+                ws = await self._get_step(workflow_id, step_order, state["replan_count"])
+                if ws:
+                    ws.status = StepStatus.FAILED
+                    ws.error_message = f"Policy denied: {decision.reason}"
+                    ws.completed_at = datetime.now(UTC)
+                    await self._db.flush()
+                await write_audit_log(
+                    self._db,
+                    workflow_id=uuid.UUID(workflow_id),
+                    action=AuditAction.TOOL_BLOCKED,
+                    actor=state["actor"],
+                    server_name=server_name,
+                    tool_name=tool_name,
+                    request_payload={"arguments": arguments},
+                    allowed=False,
+                    policy_decision={
+                        "reason": decision.reason,
+                        "actor_role": decision.actor_role,
+                    },
+                )
+                await self._db.flush()
+                step_results.append({
+                    "step_order": step_order,
+                    "server_name": server_name,
+                    "tool_name": tool_name,
+                    "result": None,
+                    "latency_ms": 0,
+                    "error": f"Policy denied: {decision.reason}",
+                    "denied": True,
+                })
+                await self._publish_event(workflow_id, {
+                    "type": "step_denied",
+                    "step": step_order,
+                    "server": server_name,
+                    "tool": tool_name,
+                    "reason": decision.reason,
+                    "actor_role": decision.actor_role,
+                })
+                logger.info(
+                    "orchestrator.step_denied",
+                    workflow_id=workflow_id,
+                    step=step_order,
+                    tool=tool_name,
+                    reason=decision.reason,
+                    actor_role=decision.actor_role,
+                )
+                continue
+
+            # ── Human-in-the-loop: check if approval required ─────────────────
             needs_approval = (
                 step.get("requires_approval", False)
-                or (tool_def is not None
-                    and tool_def.get("required_permission") in _APPROVAL_PERMISSIONS)
+                or required_permission in _APPROVAL_PERMISSIONS
             )
             if needs_approval:
                 approved = await self._wait_for_approval(workflow_id, step)

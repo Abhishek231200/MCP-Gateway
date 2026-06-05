@@ -50,6 +50,7 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-mcp_user}:${POSTGRES_PASSWORD:-mcp_password}@postgres:5432/${POSTGRES_DB:-mcp_gateway}
       REDIS_URL: redis://redis:6379/0
+      OPA_URL: http://opa:8181
     ports:
       - "${API_PORT:-8000}:8000"
     volumes:
@@ -60,12 +61,25 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      opa:
+        condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  # ─── OPA Policy Engine ──────────────────────────────────────────────────────
+  opa:
+    image: openpolicyagent/opa:latest
+    container_name: mcp_opa
+    restart: unless-stopped
+    command: run --server --addr 0.0.0.0:8181 --log-level error /policies
+    volumes:
+      - ./opa/policies:/policies:ro
+    ports:
+      - "8181:8181"
 
   # ─── Knowledge Base (RAG) ───────────────────────────────────────────────────
   kb:
@@ -74,7 +88,7 @@ services:
     container_name: mcp_kb
     restart: unless-stopped
     environment:
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
     ports:
       - "8001:8001"
     healthcheck:

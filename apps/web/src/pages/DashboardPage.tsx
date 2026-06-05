@@ -2,6 +2,7 @@ import { Activity, Server, GitBranch, ShieldAlert } from "lucide-react";
 import { useHealthCheck } from "@/hooks/useHealthCheck";
 import { useServers } from "@/hooks/useRegistry";
 import { useWorkflows } from "@/hooks/useWorkflows";
+import { useAuditStats } from "@/hooks/useAuditLogs";
 import type { McpServer } from "@/hooks/useRegistry";
 
 interface StatCardProps {
@@ -156,6 +157,7 @@ export default function DashboardPage() {
   const { data: health, isLoading } = useHealthCheck();
   const { data: registry } = useServers();
   const { data: workflowsData } = useWorkflows(100);
+  const { data: auditStats } = useAuditStats();
 
   const todayMs = 24 * 60 * 60 * 1000;
 
@@ -199,7 +201,7 @@ export default function DashboardPage() {
         />
         <StatCard
           label="Blocked Actions"
-          value="—"
+          value={auditStats?.blocked_today ?? "—"}
           icon={ShieldAlert}
           description="Security gateway blocks today"
         />

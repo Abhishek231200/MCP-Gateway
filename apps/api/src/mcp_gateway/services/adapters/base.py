@@ -1,8 +1,10 @@
 """BaseAdapter ABC — contract every MCP server adapter must implement."""
 
+import hashlib
 import time
 import uuid
 from abc import ABC, abstractmethod
+from datetime import UTC, datetime
 from typing import Any, TypedDict
 
 import structlog
@@ -95,20 +97,19 @@ class BaseAdapter(ABC):
             error = exc
 
         latency_ms = round((time.perf_counter() - t0) * 1000)
-        action = AuditAction.TOOL_BLOCKED if error else AuditAction.TOOL_CALL
-        db.add(
-            AuditLog(
-                action=action,
-                actor=actor,
-                server_name=server.name,
-                tool_name=tool_name,
-                request_payload={"arguments": arguments},
-                response_payload=(
-                    {"result": result} if error is None else {"error": str(error)}
-                ),
-                allowed=error is None,
-                latency_ms=latency_ms,
-            )
+        audit_action = AuditAction.TOOL_BLOCKED if error else AuditAction.TOOL_CALL
+        await write_audit_log(
+            db,
+            action=audit_action,
+            actor=actor,
+            server_name=server.name,
+            tool_name=tool_name,
+            request_payload={"arguments": arguments},
+            response_payload=(
+                {"result": result} if error is None else {"error": str(error)}
+            ),
+            allowed=error is None,
+            latency_ms=latency_ms,
         )
         await db.flush()
 
@@ -136,6 +137,39 @@ class BaseAdapter(ABC):
                 "adapter_type": self.adapter_type,
             },
         )
+
+
+async def write_audit_log(db: AsyncSession, **kwargs: Any) -> AuditLog:
+    """Insert an AuditLog entry with a computed hash chain.
+
+    The caller passes the same kwargs as AuditLog.__init__; this function
+    queries the previous entry's hash, computes the new entry's hash, and
+    sets both before adding to the session.
+    """
+    prev_result = await db.execute(
+        select(AuditLog.entry_hash).order_by(AuditLog.created_at.desc()).limit(1)
+    )
+    prev_hash: str = prev_result.scalar() or "genesis"
+
+    entry_id = kwargs.pop("id", uuid.uuid4())
+    created_at = kwargs.pop("created_at", datetime.now(UTC))
+
+    action_val = str(kwargs.get("action", ""))
+    actor_val = str(kwargs.get("actor", ""))
+    server_val = str(kwargs.get("server_name") or "")
+    tool_val = str(kwargs.get("tool_name") or "")
+    content = f"{entry_id}|{action_val}|{actor_val}|{server_val}|{tool_val}|{created_at.isoformat()}|{prev_hash}"
+    entry_hash = hashlib.sha256(content.encode()).hexdigest()
+
+    entry = AuditLog(
+        id=entry_id,
+        created_at=created_at,
+        entry_hash=entry_hash,
+        prev_hash=prev_hash,
+        **kwargs,
+    )
+    db.add(entry)
+    return entry
 
 
 async def _update_latency(
