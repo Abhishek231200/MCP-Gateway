@@ -37,8 +37,8 @@ async def create_workflow(
     Returns immediately with status=pending; use the WebSocket stream endpoint
     to receive live progress events.
     """
-    if not settings.groq_api_key and not settings.openai_api_key:
-        raise HTTPException(status_code=503, detail="No LLM API key configured (set GROQ_API_KEY or OPENAI_API_KEY)")
+    if not settings.openai_api_key:
+        raise HTTPException(status_code=503, detail="No LLM API key configured (set OPENAI_API_KEY)")
 
     workflow = Workflow(
         task=payload.task,

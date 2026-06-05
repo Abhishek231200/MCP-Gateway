@@ -233,7 +233,8 @@ class SlackAdapter(BaseAdapter):
     async def _post_message(
         self, args: dict[str, Any], headers: dict[str, str]
     ) -> dict[str, Any]:
-        payload: dict[str, Any] = {"channel": args["channel"], "text": args["text"]}
+        text = args.get("text") or args.get("message") or args.get("content") or args.get("summary", "")
+        payload: dict[str, Any] = {"channel": args["channel"], "text": text}
         if thread_ts := args.get("thread_ts"):
             payload["thread_ts"] = thread_ts
         data = await _slack_request("POST", "chat.postMessage", headers, payload)

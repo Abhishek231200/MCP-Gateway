@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from "react";
+import ReactMarkdown from "react-markdown";
 import { GitBranch, Play, Loader2, CheckCircle2, XCircle, Clock, Zap, RefreshCw, ShieldAlert, SkipForward } from "lucide-react";
 import {
   useWorkflows,
@@ -205,7 +206,12 @@ function DetailPanel({ workflowId }: DetailPanelProps) {
 
   if (!workflow) return null;
 
-  const finalAnswer = workflow.result?.answer as string | undefined;
+  const rawAnswer = workflow.result?.answer;
+  const finalAnswer = rawAnswer
+    ? typeof rawAnswer === "string"
+      ? rawAnswer
+      : JSON.stringify(rawAnswer, null, 2)
+    : undefined;
   const isTerminal = ["completed", "failed", "cancelled"].includes(workflow.status);
 
   return (
@@ -272,8 +278,20 @@ function DetailPanel({ workflowId }: DetailPanelProps) {
       {/* Final answer */}
       {finalAnswer && (
         <div className="p-3 rounded-lg bg-emerald-900/20 border border-emerald-800/50">
-          <p className="text-xs font-semibold text-emerald-400 mb-1">Answer</p>
-          <p className="text-sm text-gray-200 whitespace-pre-wrap">{finalAnswer}</p>
+          <p className="text-xs font-semibold text-emerald-400 mb-2">Answer</p>
+          <div className="text-sm text-gray-200 prose prose-invert prose-sm max-w-none
+            [&>p]:mb-2 [&>ul]:mb-2 [&>ol]:mb-2 [&>ul]:pl-4 [&>ol]:pl-4
+            [&>ul>li]:list-disc [&>ol>li]:list-decimal
+            [&>h1]:text-base [&>h2]:text-sm [&>h3]:text-sm
+            [&>h1]:font-semibold [&>h2]:font-semibold [&>h3]:font-semibold
+            [&>h1]:mb-1 [&>h2]:mb-1 [&>h3]:mb-1
+            [&>table]:w-full [&>table]:text-xs [&>table]:border-collapse
+            [&_th]:text-left [&_th]:text-gray-400 [&_th]:border-b [&_th]:border-gray-700 [&_th]:pb-1 [&_th]:pr-3
+            [&_td]:py-1 [&_td]:pr-3 [&_td]:border-b [&_td]:border-gray-800
+            [&>pre]:bg-gray-900 [&>pre]:p-2 [&>pre]:rounded [&>pre]:text-xs [&>pre]:overflow-x-auto
+            [&>code]:bg-gray-800 [&>code]:px-1 [&>code]:rounded [&>code]:text-xs">
+            <ReactMarkdown>{finalAnswer}</ReactMarkdown>
+          </div>
         </div>
       )}
 

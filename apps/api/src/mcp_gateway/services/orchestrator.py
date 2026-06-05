@@ -36,8 +36,8 @@ from mcp_gateway.services.security_gateway import get_security_gateway
 
 logger = structlog.get_logger()
 
-_MAX_STEPS = 10
-_MAX_REPLANS = 1
+_MAX_STEPS = 6
+_MAX_REPLANS = 0
 _MAX_RETRIES = 2          # transient-error retries per step
 _RETRY_BACKOFF = 1.0      # base backoff seconds (doubles each attempt)
 _APPROVAL_TIMEOUT = 600.0 # seconds to wait for human approval before auto-reject
@@ -120,32 +120,24 @@ class WorkflowOrchestrator:
     # ── Public entry point ────────────────────────────────────────────────────
 
     def _llm_client(self) -> openai.AsyncOpenAI:
-        """Return an OpenAI-compatible async client.
-
-        Prefers Groq (free tier) when GROQ_API_KEY is set; falls back to OpenAI.
-        """
-        if settings.groq_api_key:
-            return openai.AsyncOpenAI(
-                api_key=settings.groq_api_key,
-                base_url="https://api.groq.com/openai/v1",
-            )
         return openai.AsyncOpenAI(api_key=settings.openai_api_key)
 
     def _llm_model(self) -> str:
-        if settings.groq_api_key:
-            return "llama-3.1-8b-instant"
-        return "gpt-4o-mini"
+        return "gpt-4o"
+
+    def _is_openai(self) -> bool:
+        return True
 
     async def run(self, workflow_id: str, task: str, actor: str) -> None:
         """Build initial state, drive the graph, handle top-level failures."""
-        if not settings.groq_api_key and not settings.openai_api_key:
+        if not settings.openai_api_key:
             await self._update_workflow_status(
                 workflow_id, WorkflowStatus.FAILED,
-                error="No LLM API key configured (set GROQ_API_KEY or OPENAI_API_KEY)",
+                error="No LLM API key configured (set OPENAI_API_KEY)",
             )
             await self._publish_event(workflow_id, {
                 "type": "workflow_failed",
-                "error": "No LLM API key configured (set GROQ_API_KEY or OPENAI_API_KEY)",
+                "error": "No LLM API key configured (set OPENAI_API_KEY)",
             })
             return
 
@@ -216,37 +208,48 @@ class WorkflowOrchestrator:
                 )
                 replan_context = f"\n\nPrevious attempt failed. Issues to avoid:\n{failure_lines}"
 
-        prompt = (
-            f"You are a planning agent for MCP Gateway, an AI orchestration platform.\n\n"
+        system_prompt = (
+            "You are a planning agent for MCP Gateway. "
+            "Your ONLY job is to produce a JSON execution plan. "
+            "You must respond with valid JSON and nothing else — no markdown, no explanation."
+        )
+
+        user_prompt = (
             f"Available tools:\n{tool_manifest}\n\n"
             f"Task: {state['task']}{replan_context}\n\n"
-            f"Decompose the task into a minimal sequence of tool calls. "
-            f"Respond ONLY with valid JSON — no markdown, no commentary:\n"
-            f'{{"reasoning": "...", "steps": [{{'
-            f'"step_order": 1, "server_name": "exact-server-name", '
-            f'"tool_name": "exact-tool-name", "arguments": {{}}, "reasoning": "...", '
-            f'"depends_on": []}}, ...]}}\n\n'
-            f"Rules:\n"
-            f"- Only use server_name / tool_name values exactly as listed above\n"
-            f"- Maximum {_MAX_STEPS} steps\n"
-            f"- CRITICAL: Steps execute sequentially but cannot pass results to each other. "
-            f"Every argument in every step must be fully known at planning time from the task description alone. "
-            f"Do NOT create a step whose arguments depend on the output of a previous step. "
-            f"If you do not know a required argument (e.g. 'owner', 'repo', 'number') from the task text, "
-            f"do not include that step.\n"
-            f"- depends_on: list of step_order integers that must succeed for this step to run. "
-            f"Set this when the step only makes sense if a prior step succeeded. Leave [] if independent.\n"
-            f"- Prefer broad listing tools (list_repos, list_channels) when the task asks for an overview. "
-            f"Only call detail tools (get_pr, get_issue, list_issues) if the owner and repo are explicitly stated in the task.\n"
-            f"- If the task cannot be accomplished, return {{\"reasoning\": \"...\", \"steps\": []}}"
+            f"RULES — follow exactly:\n"
+            f"1. Plan EXACTLY one step per distinct action the task requests — no more, no fewer.\n"
+            f"2. For EVERY argument, read the tool's input_schema above and use the exact key names shown.\n"
+            f"3. Extract arguments directly from the task text:\n"
+            f"   - GitHub 'OWNER/REPO' format → split into owner='OWNER' and repo='REPO' as separate fields.\n"
+            f"   - Slack '#channel' → use the channel name as-is including the # sign.\n"
+            f"   - Knowledge base questions → use the 'query' tool (full RAG) not 'search'; pass the question as 'question' key.\n"
+            f"   - For Slack post_message or any step that should send a summary of prior step results, "
+            f"set the text/message argument to the literal string '{{{{step_results}}}}'. "
+            f"The system will automatically substitute it with the actual results at execution time.\n"
+            f"4. Do NOT add extra steps not mentioned in the task.\n"
+            f"5. depends_on: list step_order integers that must succeed before this step runs.\n"
+            f"   Set this for steps that logically require prior steps to have succeeded (e.g. a Slack post depends on the data-gathering steps).\n"
+            f"6. Maximum {_MAX_STEPS} steps. If the task cannot be done, return {{\"reasoning\": \"why\", \"steps\": []}}.\n\n"
+            f"Respond with this exact JSON structure:\n"
+            f'{{"reasoning": "one sentence on your plan", "steps": ['
+            f'{{"step_order": 1, "server_name": "...", "tool_name": "...", '
+            f'"arguments": {{}}, "reasoning": "why this step", "depends_on": []}}]}}'
         )
 
         client = self._llm_client()
-        response = await client.chat.completions.create(
-            model=self._llm_model(),
-            max_tokens=2048,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        call_kwargs: dict[str, Any] = {
+            "model": self._llm_model(),
+            "max_tokens": 2048,
+            "temperature": 0,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+        if self._is_openai():
+            call_kwargs["response_format"] = {"type": "json_object"}
+        response = await client.chat.completions.create(**call_kwargs)
         tokens_used = (response.usage.prompt_tokens + response.usage.completion_tokens) if response.usage else 0
         raw = (response.choices[0].message.content or "").strip()
 
@@ -324,6 +327,7 @@ class WorkflowOrchestrator:
 
         workflow_id = state["workflow_id"]
         await self._update_workflow_status(workflow_id, WorkflowStatus.RUNNING)
+        await self._db.commit()  # commit so steps appear in UI as they run
         await self._publish_event(workflow_id, {"type": "status_change", "status": "running"})
 
         step_results: list[dict[str, Any]] = []
@@ -332,7 +336,18 @@ class WorkflowOrchestrator:
             step_order: int = step["step_order"]
             server_name: str = step["server_name"]
             tool_name: str = step["tool_name"]
-            arguments: dict[str, Any] = step.get("arguments", {})
+            arguments: dict[str, Any] = dict(step.get("arguments", {}))
+
+            # ── Substitute {{step_results}} template in any string argument ────
+            if step_results and any(
+                isinstance(v, str) and "{{step_results}}" in v
+                for v in arguments.values()
+            ):
+                formatted = await self._format_for_slack(state["task"], step_results)
+                arguments = {
+                    k: v.replace("{{step_results}}", formatted) if isinstance(v, str) else v
+                    for k, v in arguments.items()
+                }
 
             # ── Conditional branch: skip if a dependency failed ───────────────
             depends_on: list[int] = step.get("depends_on", [])
@@ -540,6 +555,7 @@ class WorkflowOrchestrator:
                     "latency_ms": tool_result["latency_ms"],
                     "error": None,
                 })
+                await self._db.commit()
                 await self._publish_event(workflow_id, {
                     "type": "step_completed",
                     "step": step_order,
@@ -561,6 +577,7 @@ class WorkflowOrchestrator:
                     "latency_ms": latency_ms,
                     "error": error_msg,
                 })
+                await self._db.commit()
                 await self._publish_event(workflow_id, {
                     "type": "step_failed",
                     "step": step_order,
@@ -572,6 +589,38 @@ class WorkflowOrchestrator:
 
         return {"step_results": step_results}
 
+    # ── Slack message formatter ───────────────────────────────────────────────
+
+    async def _format_for_slack(
+        self, task: str, step_results: list[dict[str, Any]]
+    ) -> str:
+        """Call gpt-4o-mini to format step results into a clean Slack mrkdwn message."""
+        results_text = "\n\n".join(
+            f"[{r['tool_name']}]: {'FAILED — ' + r['error'] if r.get('error') else json.dumps(r['result'], default=str)[:3000]}"
+            for r in step_results
+        )
+        prompt = (
+            f"Format the following data as a concise, professional Slack message using Slack mrkdwn.\n"
+            f"Original task: {task}\n\n"
+            f"Data from executed steps:\n{results_text}\n\n"
+            f"Rules:\n"
+            f"- Use *bold* for section headers and key terms\n"
+            f"- Use bullet points (•) for lists\n"
+            f"- Be concise — summarize, don't dump raw data\n"
+            f"- Include only what's relevant to the task\n"
+            f"- No markdown headers (# ## ###) — use *bold* instead\n"
+            f"- Keep it under 400 words\n"
+            f"Return only the formatted Slack message text, nothing else."
+        )
+        client = openai.AsyncOpenAI(api_key=settings.openai_api_key)
+        response = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            max_tokens=600,
+            temperature=0,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return (response.choices[0].message.content or "").strip()
+
     # ── Approval gate ─────────────────────────────────────────────────────────
 
     async def _wait_for_approval(
@@ -582,6 +631,7 @@ class WorkflowOrchestrator:
         _pending_approvals[workflow_id] = event
 
         await self._update_workflow_status(workflow_id, WorkflowStatus.AWAITING_APPROVAL)
+        await self._db.commit()  # commit so the polling UI sees awaiting_approval + steps
         await self._publish_event(workflow_id, {
             "type": "checkpoint_reached",
             "step": step["step_order"],
@@ -640,23 +690,33 @@ class WorkflowOrchestrator:
         results_text = "\n".join(summary_lines) or "No steps were executed."
 
         prompt = (
-            f"You are a reviewer agent for MCP Gateway.\n\n"
-            f"Original task: {state['task']}\n\n"
+            f"You are a reviewer agent. Evaluate whether the execution results answer the task, "
+            f"then synthesise a response.\n\n"
+            f"Task: {state['task']}\n\n"
             f"Execution results:\n{results_text}\n\n"
-            f"Write a direct, human-readable answer to the task using the actual data above. "
-            f"Include the real names, values, and details from the results — do NOT just say 'the results were retrieved'. "
-            f"Respond ONLY with valid JSON — no markdown, no commentary:\n"
-            f'{{"sufficient": true, "answer": "direct answer with actual data from results", "feedback": ""}}\n'
-            f"Or if the results are empty or all steps failed:\n"
-            f'{{"sufficient": false, "answer": "", "feedback": "what specifically failed"}}'
+            f"Your entire response must be a single JSON object with these exact keys:\n"
+            f"  sufficient: true if the results answer the task, false if all steps failed or results are empty\n"
+            f"  answer: a markdown-formatted string with the actual answer — "
+            f"use tables for lists, bullets for summaries, prose for explanations. "
+            f"Include real names and values. This MUST be a string, not an array or object.\n"
+            f"  feedback: empty string if sufficient, otherwise a short description of what failed\n\n"
+            f"Example of a valid response:\n"
+            f'{{"sufficient": true, "answer": "## Repositories\\n| Name | Language |\\n|---|---|\\n| repo1 | Python |", "feedback": ""}}'
         )
 
         client = self._llm_client()
-        response = await client.chat.completions.create(
-            model=self._llm_model(),
-            max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        review_kwargs: dict[str, Any] = {
+            "model": self._llm_model(),
+            "max_tokens": 1024,
+            "temperature": 0,
+            "messages": [
+                {"role": "system", "content": "You are a reviewer agent. Respond with valid JSON only — no markdown, no explanation."},
+                {"role": "user", "content": prompt},
+            ],
+        }
+        if self._is_openai():
+            review_kwargs["response_format"] = {"type": "json_object"}
+        response = await client.chat.completions.create(**review_kwargs)
         tokens_used = (response.usage.prompt_tokens + response.usage.completion_tokens) if response.usage else 0
         raw = (response.choices[0].message.content or "").strip()
 

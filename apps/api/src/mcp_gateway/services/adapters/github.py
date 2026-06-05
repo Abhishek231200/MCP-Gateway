@@ -231,9 +231,16 @@ class GitHubAdapter(BaseAdapter):
 
     async def _list_repos(self, args: dict[str, Any], headers: dict[str, str]) -> list[dict[str, Any]]:
         org = args.get("org")
-        per_page = args.get("per_page", 30)
-        path = f"/orgs/{org}/repos" if org else "/user/repos"
-        data = await _gh_request("GET", path, headers, params={"per_page": per_page})
+        owner = args.get("owner") or args.get("username") or args.get("user")
+        per_page = min(args.get("per_page", 100), 100)
+        params = {"per_page": per_page, "sort": "updated", "direction": "desc"}
+        if org:
+            path = f"/orgs/{org}/repos"
+        elif owner:
+            path = f"/users/{owner}/repos"
+        else:
+            path = "/user/repos"
+        data = await _gh_request("GET", path, headers, params=params)
         return [_normalize_repo(r) for r in data]
 
     @staticmethod
