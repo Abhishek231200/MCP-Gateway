@@ -34,7 +34,7 @@ def _apply_filters(
     if actor:
         stmt = stmt.where(AuditLog.actor.ilike(f"%{actor}%"))
     if server:
-        stmt = stmt.where(AuditLog.server_name == server)
+        stmt = stmt.where(AuditLog.server_name.ilike(f"%{server}%"))
     if tool:
         stmt = stmt.where(AuditLog.tool_name.ilike(f"%{tool}%"))
     if action:

@@ -1,4 +1,13 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+
+function useDebounce<T>(value: T, delay = 300): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(t);
+  }, [value, delay]);
+  return debounced;
+}
 import { ShieldCheck, ShieldX, Download, Link2, Link2Off, RefreshCw } from "lucide-react";
 import { useAuditLogs, useAuditStats } from "@/hooks/useAuditLogs";
 import type { AuditLogEntry } from "@/hooks/useAuditLogs";
@@ -156,12 +165,16 @@ export default function AuditLogPage() {
   const [allowed, setAllowed] = useState<"" | "true" | "false">("");
   const [offset, setOffset] = useState(0);
 
+  const dActor = useDebounce(actor);
+  const dServer = useDebounce(server);
+  const dTool = useDebounce(tool);
+
   const resetPage = () => setOffset(0);
 
   const params = {
-    actor: actor || undefined,
-    server: server || undefined,
-    tool: tool || undefined,
+    actor: dActor || undefined,
+    server: dServer || undefined,
+    tool: dTool || undefined,
     action: action || undefined,
     allowed: allowed === "" ? undefined : allowed === "true",
     limit: PAGE_SIZE,

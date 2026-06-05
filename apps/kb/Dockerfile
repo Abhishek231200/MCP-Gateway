@@ -10,7 +10,9 @@ RUN pip install --no-cache-dir \
     uvicorn[standard]==0.30.6 \
     sentence-transformers==3.0.1 \
     numpy==1.26.4 \
-    openai>=1.30.0
+    openai>=1.30.0 \
+    psycopg2-binary>=2.9 \
+    pgvector>=0.2.0
 
 # Pre-download the embedding model so container startup is instant
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"

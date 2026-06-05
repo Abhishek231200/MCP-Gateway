@@ -2,6 +2,7 @@
 
 from datetime import datetime
 from typing import Any
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
@@ -9,8 +10,8 @@ from pydantic import BaseModel, ConfigDict
 class AuditLogResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
-    workflow_id: str | None
+    id: UUID
+    workflow_id: UUID | None
     action: str
     actor: str
     server_name: str | None
@@ -21,16 +22,6 @@ class AuditLogResponse(BaseModel):
     created_at: datetime
     entry_hash: str | None
     prev_hash: str | None
-
-    @classmethod
-    def model_validate(cls, obj: Any, **kwargs: Any) -> "AuditLogResponse":
-        # Coerce UUID fields to str for JSON serialisation
-        data = super().model_validate(obj, **kwargs)
-        if data.id and not isinstance(data.id, str):
-            data.id = str(data.id)
-        if data.workflow_id and not isinstance(data.workflow_id, str):
-            data.workflow_id = str(data.workflow_id)
-        return data
 
 
 class AuditLogListResponse(BaseModel):

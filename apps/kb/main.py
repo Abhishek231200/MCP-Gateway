@@ -1,77 +1,122 @@
-"""MCP Knowledge Base service — semantic RAG pipeline.
+"""MCP Knowledge Base service — semantic RAG pipeline with pgvector persistence.
 
-  POST /query           — full RAG: retrieve relevant chunks + generate answer via Claude
+  POST /query           — full RAG: retrieve relevant chunks + generate answer via OpenAI
   POST /search          — semantic similarity search (retrieval only, no generation)
   POST /documents       — add and index a document
   GET  /documents       — paginated list
   DELETE /documents/{id} — remove a document
-  GET  /health
+  GET  / and GET /health
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import uuid
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Generator
 
-import openai
 import numpy as np
+import openai
+import psycopg2
+import psycopg2.extras
 from fastapi import FastAPI, HTTPException
+from pgvector.psycopg2 import register_vector
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 
-app = FastAPI(title="MCP Knowledge Base", version="2.0.0")
+_log = logging.getLogger("kb")
 
-# ── Embedding model ───────────────────────────────────────────────────────────
-# all-MiniLM-L6-v2: 384-dim, 22 MB, fast CPU inference, good semantic quality
 _embedder = SentenceTransformer("all-MiniLM-L6-v2")
 
-# ── In-memory store ───────────────────────────────────────────────────────────
-_docs: dict[str, dict[str, Any]] = {}
-_embeddings: np.ndarray | None = None  # shape (n_docs, 384)
-_ordered_ids: list[str] = []
+# Accept either asyncpg-style or plain psycopg2-style URL
+_DSN = os.getenv("DATABASE_URL", "").replace("postgresql+asyncpg://", "postgresql://")
 
 
-def _rebuild_index() -> None:
-    global _embeddings, _ordered_ids
-    if not _docs:
-        _embeddings = None
-        _ordered_ids = []
+# ── DB helpers ────────────────────────────────────────────────────────────────
+
+def _new_conn() -> psycopg2.extensions.connection:
+    conn = psycopg2.connect(_DSN)
+    register_vector(conn)
+    return conn
+
+
+@contextmanager
+def _conn() -> Generator[psycopg2.extensions.connection, None, None]:
+    conn = _new_conn()
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+# ── App + startup init ────────────────────────────────────────────────────────
+
+app = FastAPI(title="MCP Knowledge Base", version="3.0.0")
+
+
+@app.on_event("startup")
+def _init_db() -> None:
+    """Ensure vector extension and kb_documents table exist."""
+    if not _DSN:
+        _log.warning("DATABASE_URL not set — KB running without persistence")
         return
-    _ordered_ids = list(_docs.keys())
-    texts = [_docs[i]["content"] for i in _ordered_ids]
-    _embeddings = _embedder.encode(texts, convert_to_numpy=True)
+    try:
+        conn = psycopg2.connect(_DSN)
+        with conn.cursor() as cur:
+            cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        conn.commit()
+        register_vector(conn)
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS kb_documents (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    title TEXT,
+                    content TEXT NOT NULL,
+                    metadata JSONB DEFAULT '{}',
+                    embedding vector(384),
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+        conn.commit()
+        conn.close()
+        _log.info("KB database ready")
+    except Exception as exc:
+        _log.warning("KB _init_db failed (service will be degraded): %s", exc)
 
 
-def _cosine_scores(query_vec: np.ndarray, matrix: np.ndarray) -> np.ndarray:
-    """query_vec: (d,)  matrix: (n, d)  →  scores: (n,)"""
-    q = query_vec / (np.linalg.norm(query_vec) + 1e-10)
-    norms = np.linalg.norm(matrix, axis=1, keepdims=True) + 1e-10
-    return (matrix / norms) @ q
-
+# ── Core search logic ─────────────────────────────────────────────────────────
 
 def _semantic_search(query: str, top_k: int, min_score: float) -> list[dict[str, Any]]:
-    if not _docs or _embeddings is None:
-        return []
-    query_vec = _embedder.encode(query, convert_to_numpy=True)
-    scores = _cosine_scores(query_vec, _embeddings)
-    top_n = min(top_k, len(_ordered_ids))
-    top_indices = np.argsort(scores)[::-1][:top_n]
-    results = []
-    for idx in top_indices:
-        score = float(scores[idx])
-        if score < min_score:
-            continue
-        doc_id = _ordered_ids[int(idx)]
-        doc = _docs[doc_id]
-        results.append({
-            "id": doc_id,
-            "content": doc["content"],
-            "title": doc.get("title"),
-            "metadata": doc.get("metadata", {}),
-            "score": round(score, 4),
-        })
-    return results
+    query_vec = _embedder.encode(query, convert_to_numpy=True).astype(np.float32)
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id::text, title, content, metadata,
+                       1 - (embedding <=> %s) AS score
+                FROM kb_documents
+                ORDER BY embedding <=> %s
+                LIMIT %s
+                """,
+                (query_vec, query_vec, top_k),
+            )
+            rows = cur.fetchall()
+    return [
+        {
+            "id": r["id"],
+            "title": r["title"],
+            "content": r["content"],
+            "metadata": r["metadata"] or {},
+            "score": round(float(r["score"]), 4),
+        }
+        for r in rows
+        if float(r["score"]) >= min_score
+    ]
 
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
@@ -100,18 +145,25 @@ class AddDocumentRequest(BaseModel):
 @app.get("/")
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"status": "healthy", "documents": len(_docs)}
+    if not _DSN:
+        return {"status": "degraded", "error": "DATABASE_URL not set", "documents": 0}
+    try:
+        with _conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM kb_documents")
+                (count,) = cur.fetchone()
+        return {"status": "healthy", "documents": count}
+    except Exception as exc:
+        return {"status": "degraded", "error": str(exc), "documents": 0}
 
 
 @app.post("/search")
 def search(req: SearchRequest) -> list[dict[str, Any]]:
-    """Semantic retrieval only — no generation."""
     return _semantic_search(req.query, req.top_k, req.min_score)
 
 
 @app.post("/query")
 def query(req: QueryRequest) -> dict[str, Any]:
-    """Full RAG: retrieve relevant chunks then generate a grounded answer via OpenAI."""
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise HTTPException(status_code=503, detail="OPENAI_API_KEY not configured")
@@ -155,30 +207,36 @@ def query(req: QueryRequest) -> dict[str, Any]:
 @app.post("/documents", status_code=201)
 def add_document(req: AddDocumentRequest) -> dict[str, Any]:
     doc_id = str(uuid.uuid4())
-    _docs[doc_id] = {
-        "id": doc_id,
-        "content": req.content,
-        "title": req.title,
-        "metadata": req.metadata or {},
-    }
-    _rebuild_index()
+    embedding = _embedder.encode(req.content, convert_to_numpy=True).astype(np.float32)
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO kb_documents (id, title, content, metadata, embedding)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (doc_id, req.title, req.content, psycopg2.extras.Json(req.metadata or {}), embedding),
+            )
     return {"id": doc_id, "status": "indexed", "title": req.title}
 
 
 @app.get("/documents")
 def list_documents(limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
-    all_docs = list(_docs.values())
-    paged = all_docs[offset: offset + limit]
-    return [
-        {"id": d["id"], "title": d.get("title"), "metadata": d.get("metadata", {})}
-        for d in paged
-    ]
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id::text, title, metadata FROM kb_documents ORDER BY created_at DESC LIMIT %s OFFSET %s",
+                (limit, offset),
+            )
+            rows = cur.fetchall()
+    return [{"id": r["id"], "title": r["title"], "metadata": r["metadata"] or {}} for r in rows]
 
 
 @app.delete("/documents/{document_id}")
 def delete_document(document_id: str) -> dict[str, str]:
-    if document_id not in _docs:
-        raise HTTPException(status_code=404, detail=f"Document '{document_id}' not found")
-    del _docs[document_id]
-    _rebuild_index()
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM kb_documents WHERE id = %s::uuid", (document_id,))
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=404, detail=f"Document '{document_id}' not found")
     return {"deleted": document_id}
