@@ -36,7 +36,7 @@ from mcp_gateway.services.security_gateway import get_security_gateway
 
 logger = structlog.get_logger()
 
-_MAX_STEPS = 6
+_MAX_STEPS = 10
 _MAX_REPLANS = 0
 _MAX_RETRIES = 2          # transient-error retries per step
 _RETRY_BACKOFF = 1.0      # base backoff seconds (doubles each attempt)
@@ -320,8 +320,39 @@ class WorkflowOrchestrator:
 
     # ── Executor node ─────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _build_execution_waves(plan: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+        """Group steps into waves where every step in a wave can run concurrently.
+
+        A step enters a wave once all its depends_on steps are in earlier waves.
+        """
+        completed: set[int] = set()
+        remaining = list(plan)
+        waves: list[list[dict[str, Any]]] = []
+        while remaining:
+            wave = [s for s in remaining if set(s.get("depends_on") or []).issubset(completed)]
+            if not wave:
+                wave = [remaining[0]]  # break circular dependency
+            waves.append(wave)
+            for s in wave:
+                completed.add(s["step_order"])
+            remaining = [s for s in remaining if s not in wave]
+        return waves
+
+    def _step_permission(self, step: dict[str, Any], available_tools: list[dict[str, Any]]) -> str:
+        tool_def = next(
+            (t for t in available_tools
+             if t["server_name"] == step["server_name"] and t["tool_name"] == step["tool_name"]),
+            None,
+        )
+        return tool_def.get("required_permission", "read") if tool_def else "read"
+
     async def _executor_node(self, state: WorkflowState) -> dict[str, Any]:
-        """Execute each planned step with retry, conditional branching, and approval gates."""
+        """Execute planned steps with wave-based parallel execution.
+
+        Steps with no overlapping depends_on run concurrently; write/admin steps
+        that require approval always run sequentially.
+        """
         if state.get("error"):
             return {}
 
@@ -331,263 +362,201 @@ class WorkflowOrchestrator:
         await self._publish_event(workflow_id, {"type": "status_change", "status": "running"})
 
         step_results: list[dict[str, Any]] = []
+        waves = self._build_execution_waves(state["plan"])
 
-        for step in state["plan"]:
-            step_order: int = step["step_order"]
-            server_name: str = step["server_name"]
-            tool_name: str = step["tool_name"]
-            arguments: dict[str, Any] = dict(step.get("arguments", {}))
-
-            # ── Substitute {{step_results}} template in any string argument ────
-            if step_results and any(
-                isinstance(v, str) and "{{step_results}}" in v
-                for v in arguments.values()
-            ):
-                formatted = await self._format_for_slack(state["task"], step_results)
-                arguments = {
-                    k: v.replace("{{step_results}}", formatted) if isinstance(v, str) else v
-                    for k, v in arguments.items()
-                }
-
-            # ── Conditional branch: skip if a dependency failed ───────────────
-            depends_on: list[int] = step.get("depends_on", [])
-            if depends_on:
-                failed_deps = [
-                    d for d in depends_on
-                    if any(r["step_order"] == d and r.get("error") for r in step_results)
-                ]
-                if failed_deps:
-                    ws = await self._get_step(workflow_id, step_order, state["replan_count"])
-                    if ws:
-                        ws.status = StepStatus.SKIPPED
-                        ws.completed_at = datetime.now(UTC)
-                        await self._db.flush()
-                    reason = f"Dependency step(s) {failed_deps} failed."
-                    step_results.append({
-                        "step_order": step_order,
-                        "server_name": server_name,
-                        "tool_name": tool_name,
-                        "result": None,
-                        "latency_ms": 0,
-                        "error": f"Skipped — {reason}",
-                        "skipped": True,
-                    })
-                    await self._publish_event(workflow_id, {
-                        "type": "step_skipped",
-                        "step": step_order,
-                        "tool": tool_name,
-                        "reason": reason,
-                    })
-                    logger.info("orchestrator.step_skipped", workflow_id=workflow_id,
-                                step=step_order, reason=reason)
-                    continue
-
-            # ── Resolve tool definition and permission ────────────────────────
-            tool_def = next(
-                (t for t in state["available_tools"]
-                 if t["server_name"] == server_name and t["tool_name"] == tool_name),
-                None,
-            )
-            required_permission = (
-                tool_def.get("required_permission", "read") if tool_def else "read"
-            )
-
-            # ── Security gateway: OPA policy evaluation ───────────────────────
-            gw = get_security_gateway()
-            decision = await gw.evaluate(
-                actor=state["actor"],
-                server_name=server_name,
-                tool_name=tool_name,
-                required_permission=required_permission,
-            )
-            if not decision.allow:
-                ws = await self._get_step(workflow_id, step_order, state["replan_count"])
-                if ws:
-                    ws.status = StepStatus.FAILED
-                    ws.error_message = f"Policy denied: {decision.reason}"
-                    ws.completed_at = datetime.now(UTC)
-                    await self._db.flush()
-                await write_audit_log(
-                    self._db,
-                    workflow_id=uuid.UUID(workflow_id),
-                    action=AuditAction.TOOL_BLOCKED,
-                    actor=state["actor"],
-                    server_name=server_name,
-                    tool_name=tool_name,
-                    request_payload={"arguments": arguments},
-                    allowed=False,
-                    policy_decision={
-                        "reason": decision.reason,
-                        "actor_role": decision.actor_role,
-                    },
+        for wave in waves:
+            # Run wave in parallel only when all steps are read-only and there are multiple
+            can_parallel = (
+                len(wave) > 1
+                and all(
+                    self._step_permission(s, state["available_tools"]) not in _APPROVAL_PERMISSIONS
+                    for s in wave
                 )
-                await self._db.flush()
-                step_results.append({
-                    "step_order": step_order,
-                    "server_name": server_name,
-                    "tool_name": tool_name,
-                    "result": None,
-                    "latency_ms": 0,
-                    "error": f"Policy denied: {decision.reason}",
-                    "denied": True,
-                })
-                await self._publish_event(workflow_id, {
-                    "type": "step_denied",
-                    "step": step_order,
-                    "server": server_name,
-                    "tool": tool_name,
-                    "reason": decision.reason,
-                    "actor_role": decision.actor_role,
-                })
-                logger.info(
-                    "orchestrator.step_denied",
-                    workflow_id=workflow_id,
-                    step=step_order,
-                    tool=tool_name,
-                    reason=decision.reason,
-                    actor_role=decision.actor_role,
-                )
-                continue
-
-            # ── Human-in-the-loop: check if approval required ─────────────────
-            needs_approval = (
-                step.get("requires_approval", False)
-                or required_permission in _APPROVAL_PERMISSIONS
             )
-            if needs_approval:
-                approved = await self._wait_for_approval(workflow_id, step)
-                if not approved:
-                    err = "Step rejected by user or approval timed out."
-                    ws = await self._get_step(workflow_id, step_order, state["replan_count"])
-                    if ws:
-                        ws.status = StepStatus.FAILED
-                        ws.error_message = err
-                        ws.completed_at = datetime.now(UTC)
-                        await self._db.flush()
-                    step_results.append({
-                        "step_order": step_order,
-                        "server_name": server_name,
-                        "tool_name": tool_name,
-                        "result": None,
-                        "latency_ms": 0,
-                        "error": err,
-                    })
-                    await self._publish_event(workflow_id, {
-                        "type": "step_failed",
-                        "step": step_order,
-                        "tool": tool_name,
-                        "error": err,
-                    })
-                    continue
+            if can_parallel:
+                # Each parallel step needs its own DB session — asyncpg does not
+                # allow two concurrent awaits on the same connection.
+                async def _run_isolated(step: dict[str, Any]) -> dict[str, Any]:
+                    from mcp_gateway.database import AsyncSessionLocal
+                    async with AsyncSessionLocal() as isolated_db:
+                        result = await self._execute_step(step, state, list(step_results), db=isolated_db)
+                        await isolated_db.commit()
+                        return result
 
-            # ── Mark step RUNNING ─────────────────────────────────────────────
-            ws = await self._get_step(workflow_id, step_order, state["replan_count"])
-            if ws:
-                ws.status = StepStatus.RUNNING
-                await self._db.flush()
-
-            await self._publish_event(workflow_id, {
-                "type": "step_started",
-                "step": step_order,
-                "server": server_name,
-                "tool": tool_name,
-                "arguments": arguments,
-            })
-
-            # ── Execute with retry on transient errors ────────────────────────
-            t0 = time.perf_counter()
-            tool_result: dict[str, Any] | None = None
-            error_msg: str | None = None
-
-            for attempt in range(_MAX_RETRIES + 1):
-                try:
-                    server = await get_server_by_name(self._db, server_name)
-                    if server is None:
-                        raise AdapterError(f"Server '{server_name}' not found in registry")
-                    adapter = get_adapter(server)
-                    tool_result = await adapter.invoke_tool(
-                        server=server,
-                        tool_name=tool_name,
-                        arguments=arguments,
-                        db=self._db,
-                        actor=state["actor"],
-                    )
-                    break  # success
-
-                except AdapterError as exc:
-                    is_transient = (exc.status_code or 0) in {429, 502, 503, 504}
-                    if is_transient and attempt < _MAX_RETRIES:
-                        backoff = _RETRY_BACKOFF * (2 ** attempt)
-                        await self._publish_event(workflow_id, {
-                            "type": "step_retry",
-                            "step": step_order,
-                            "attempt": attempt + 1,
-                            "max_retries": _MAX_RETRIES,
-                            "backoff_seconds": backoff,
-                        })
-                        logger.info("orchestrator.step_retry", workflow_id=workflow_id,
-                                    step=step_order, attempt=attempt + 1)
-                        await asyncio.sleep(backoff)
-                        continue
-                    error_msg = str(exc)
-                    break
-
-                except (AdapterNotFoundError, CredentialResolutionError, Exception) as exc:
-                    error_msg = str(exc)
-                    break
-
-            latency_ms = round((time.perf_counter() - t0) * 1000)
-
-            # ── Record result ─────────────────────────────────────────────────
-            if tool_result is not None:
-                result = tool_result["result"]
-                if ws:
-                    ws.status = StepStatus.COMPLETED
-                    ws.output_payload = result if isinstance(result, dict) else {"result": result}
-                    ws.latency_ms = tool_result["latency_ms"]
-                    ws.completed_at = datetime.now(UTC)
-                    await self._db.flush()
-                step_results.append({
-                    "step_order": step_order,
-                    "server_name": server_name,
-                    "tool_name": tool_name,
-                    "result": result,
-                    "latency_ms": tool_result["latency_ms"],
-                    "error": None,
-                })
-                await self._db.commit()
-                await self._publish_event(workflow_id, {
-                    "type": "step_completed",
-                    "step": step_order,
-                    "tool": tool_name,
-                    "latency_ms": tool_result["latency_ms"],
-                })
+                wave_results = await asyncio.gather(*[_run_isolated(s) for s in wave])
+                step_results.extend(wave_results)
             else:
+                for step in wave:
+                    result = await self._execute_step(step, state, list(step_results))
+                    step_results.append(result)
+
+        step_results.sort(key=lambda r: r["step_order"])
+        return {"step_results": step_results}
+
+    async def _execute_step(
+        self,
+        step: dict[str, Any],
+        state: WorkflowState,
+        step_results: list[dict[str, Any]],
+        db: AsyncSession | None = None,
+    ) -> dict[str, Any]:
+        """Execute a single planned step end-to-end and return its result dict.
+
+        Pass db=isolated_session when running in parallel to avoid asyncpg
+        concurrent-connection errors.  Sequential steps reuse self._db.
+        """
+        db = db or self._db
+        workflow_id = state["workflow_id"]
+        step_order: int = step["step_order"]
+        server_name: str = step["server_name"]
+        tool_name: str = step["tool_name"]
+        arguments: dict[str, Any] = dict(step.get("arguments", {}))
+
+        def _skipped(reason: str) -> dict[str, Any]:
+            return {"step_order": step_order, "server_name": server_name,
+                    "tool_name": tool_name, "result": None, "latency_ms": 0,
+                    "error": f"Skipped — {reason}", "skipped": True}
+
+        def _denied(reason: str, actor_role: str) -> dict[str, Any]:
+            return {"step_order": step_order, "server_name": server_name,
+                    "tool_name": tool_name, "result": None, "latency_ms": 0,
+                    "error": f"Policy denied: {reason}", "denied": True,
+                    "actor_role": actor_role}
+
+        def _failed(error: str, latency_ms: int = 0) -> dict[str, Any]:
+            return {"step_order": step_order, "server_name": server_name,
+                    "tool_name": tool_name, "result": None,
+                    "latency_ms": latency_ms, "error": error}
+
+        # ── Substitute {{step_results}} template ──────────────────────────────
+        if step_results and any(isinstance(v, str) and "{{step_results}}" in v for v in arguments.values()):
+            formatted = await self._format_for_slack(state["task"], step_results)
+            arguments = {k: v.replace("{{step_results}}", formatted) if isinstance(v, str) else v
+                         for k, v in arguments.items()}
+
+        # ── Conditional branch: skip if a dependency failed ───────────────────
+        depends_on: list[int] = step.get("depends_on", [])
+        if depends_on:
+            failed_deps = [d for d in depends_on
+                           if any(r["step_order"] == d and r.get("error") for r in step_results)]
+            if failed_deps:
+                ws = await self._get_step_with(db, workflow_id, step_order, state["replan_count"])
+                if ws:
+                    ws.status = StepStatus.SKIPPED
+                    ws.completed_at = datetime.now(UTC)
+                    await db.flush()
+                reason = f"Dependency step(s) {failed_deps} failed."
+                await self._publish_event(workflow_id, {"type": "step_skipped", "step": step_order,
+                                                         "tool": tool_name, "reason": reason})
+                return _skipped(reason)
+
+        # ── Resolve permission ────────────────────────────────────────────────
+        required_permission = self._step_permission(step, state["available_tools"])
+
+        # ── OPA policy check ──────────────────────────────────────────────────
+        gw = get_security_gateway()
+        decision = await gw.evaluate(actor=state["actor"], server_name=server_name,
+                                      tool_name=tool_name, required_permission=required_permission)
+        if not decision.allow:
+            ws = await self._get_step_with(db, workflow_id, step_order, state["replan_count"])
+            if ws:
+                ws.status = StepStatus.FAILED
+                ws.error_message = f"Policy denied: {decision.reason}"
+                ws.completed_at = datetime.now(UTC)
+                await db.flush()
+            await write_audit_log(db, workflow_id=uuid.UUID(workflow_id),
+                                   action=AuditAction.TOOL_BLOCKED, actor=state["actor"],
+                                   server_name=server_name, tool_name=tool_name,
+                                   request_payload={"arguments": arguments}, allowed=False,
+                                   policy_decision={"reason": decision.reason, "actor_role": decision.actor_role})
+            await db.flush()
+            await self._publish_event(workflow_id, {"type": "step_denied", "step": step_order,
+                                                      "server": server_name, "tool": tool_name,
+                                                      "reason": decision.reason, "actor_role": decision.actor_role})
+            return _denied(decision.reason, decision.actor_role)
+
+        # ── Approval gate ─────────────────────────────────────────────────────
+        if step.get("requires_approval", False) or required_permission in _APPROVAL_PERMISSIONS:
+            approved = await self._wait_for_approval(workflow_id, step)
+            if not approved:
+                err = "Step rejected by user or approval timed out."
+                ws = await self._get_step_with(db, workflow_id, step_order, state["replan_count"])
                 if ws:
                     ws.status = StepStatus.FAILED
-                    ws.error_message = error_msg
-                    ws.latency_ms = latency_ms
+                    ws.error_message = err
                     ws.completed_at = datetime.now(UTC)
-                    await self._db.flush()
-                step_results.append({
-                    "step_order": step_order,
-                    "server_name": server_name,
-                    "tool_name": tool_name,
-                    "result": None,
-                    "latency_ms": latency_ms,
-                    "error": error_msg,
-                })
-                await self._db.commit()
-                await self._publish_event(workflow_id, {
-                    "type": "step_failed",
-                    "step": step_order,
-                    "tool": tool_name,
-                    "error": error_msg,
-                })
-                logger.warning("orchestrator.step_failed", workflow_id=workflow_id,
-                               step=step_order, tool=tool_name, error=error_msg)
+                    await db.flush()
+                await self._publish_event(workflow_id, {"type": "step_failed", "step": step_order,
+                                                         "tool": tool_name, "error": err})
+                return _failed(err)
 
-        return {"step_results": step_results}
+        # ── Mark step RUNNING ─────────────────────────────────────────────────
+        ws = await self._get_step_with(db, workflow_id, step_order, state["replan_count"])
+        if ws:
+            ws.status = StepStatus.RUNNING
+            await db.flush()
+        await self._publish_event(workflow_id, {"type": "step_started", "step": step_order,
+                                                 "server": server_name, "tool": tool_name,
+                                                 "arguments": arguments})
+
+        # ── Execute with retry ────────────────────────────────────────────────
+        t0 = time.perf_counter()
+        tool_result: dict[str, Any] | None = None
+        error_msg: str | None = None
+
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                server = await get_server_by_name(db, server_name)
+                if server is None:
+                    raise AdapterError(f"Server '{server_name}' not found in registry")
+                adapter = get_adapter(server)
+                tool_result = await adapter.invoke_tool(server=server, tool_name=tool_name,
+                                                         arguments=arguments, db=db,
+                                                         actor=state["actor"])
+                break
+            except AdapterError as exc:
+                if (exc.status_code or 0) in {429, 502, 503, 504} and attempt < _MAX_RETRIES:
+                    backoff = _RETRY_BACKOFF * (2 ** attempt)
+                    await self._publish_event(workflow_id, {"type": "step_retry", "step": step_order,
+                                                             "attempt": attempt + 1, "max_retries": _MAX_RETRIES,
+                                                             "backoff_seconds": backoff})
+                    await asyncio.sleep(backoff)
+                    continue
+                error_msg = str(exc)
+                break
+            except (AdapterNotFoundError, CredentialResolutionError, Exception) as exc:
+                error_msg = str(exc)
+                break
+
+        latency_ms = round((time.perf_counter() - t0) * 1000)
+
+        # ── Record result ─────────────────────────────────────────────────────
+        if tool_result is not None:
+            result = tool_result["result"]
+            if ws:
+                ws.status = StepStatus.COMPLETED
+                ws.output_payload = result if isinstance(result, dict) else {"result": result}
+                ws.latency_ms = tool_result["latency_ms"]
+                ws.completed_at = datetime.now(UTC)
+                await db.flush()
+            await db.commit()
+            await self._publish_event(workflow_id, {"type": "step_completed", "step": step_order,
+                                                     "tool": tool_name, "latency_ms": tool_result["latency_ms"]})
+            return {"step_order": step_order, "server_name": server_name, "tool_name": tool_name,
+                    "result": result, "latency_ms": tool_result["latency_ms"], "error": None}
+        else:
+            if ws:
+                ws.status = StepStatus.FAILED
+                ws.error_message = error_msg
+                ws.latency_ms = latency_ms
+                ws.completed_at = datetime.now(UTC)
+                await db.flush()
+            await db.commit()
+            await self._publish_event(workflow_id, {"type": "step_failed", "step": step_order,
+                                                     "tool": tool_name, "error": error_msg})
+            logger.warning("orchestrator.step_failed", workflow_id=workflow_id,
+                           step=step_order, tool=tool_name, error=error_msg)
+            return _failed(error_msg or "Unknown error", latency_ms)
 
     # ── Slack message formatter ───────────────────────────────────────────────
 
@@ -683,11 +652,26 @@ class WorkflowOrchestrator:
                     f"Step {r['step_order']} ({r['tool_name']}): FAILED — {r['error']}"
                 )
             else:
-                result_preview = json.dumps(r["result"], default=str)[:2000]
+                result = r["result"]
+                # Render as readable text, not raw JSON, to avoid quote/newline
+                # escaping issues when the reviewer embeds this in a JSON answer field.
+                if isinstance(result, list):
+                    items = "\n".join(
+                        "  - " + ", ".join(f"{k}: {v}" for k, v in item.items() if v is not None)
+                        if isinstance(item, dict) else f"  - {item}"
+                        for item in result[:10]
+                    )
+                    preview = f"{len(result)} item(s):\n{items}"
+                elif isinstance(result, dict):
+                    preview = "\n".join(
+                        f"  {k}: {str(v)[:300]}" for k, v in result.items() if v is not None
+                    )[:2000]
+                else:
+                    preview = str(result)[:2000]
                 summary_lines.append(
-                    f"Step {r['step_order']} ({r['tool_name']}): SUCCESS — {result_preview}"
+                    f"Step {r['step_order']} ({r['tool_name']}): SUCCESS\n{preview}"
                 )
-        results_text = "\n".join(summary_lines) or "No steps were executed."
+        results_text = "\n\n".join(summary_lines) or "No steps were executed."
 
         prompt = (
             f"You are a reviewer agent. Evaluate whether the execution results answer the task, "
@@ -789,8 +773,13 @@ class WorkflowOrchestrator:
     async def _get_step(
         self, workflow_id: str, step_order: int, replan_count: int
     ) -> WorkflowStep | None:
+        return await self._get_step_with(self._db, workflow_id, step_order, replan_count)
+
+    async def _get_step_with(
+        self, db: AsyncSession, workflow_id: str, step_order: int, replan_count: int
+    ) -> WorkflowStep | None:
         role_tag = "executor" if replan_count == 0 else f"executor-replan-{replan_count}"
-        result = await self._db.execute(
+        result = await db.execute(
             select(WorkflowStep)
             .where(WorkflowStep.workflow_id == uuid.UUID(workflow_id))
             .where(WorkflowStep.step_order == step_order)

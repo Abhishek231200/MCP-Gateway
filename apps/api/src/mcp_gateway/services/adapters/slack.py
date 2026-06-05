@@ -22,14 +22,10 @@ _TOOL_DEFINITIONS = [
             "properties": {
                 "limit": {"type": "integer", "default": 100, "maximum": 200},
                 "exclude_archived": {"type": "boolean", "default": True},
-                "types": {
-                    "type": "string",
-                    "default": "public_channel",
-                    "description": "Comma-separated channel types: public_channel, private_channel, mpim, im",
-                },
+                "types": {"type": "string", "default": "public_channel"},
             },
         },
-        "output_schema": {"type": "array", "items": {"type": "object"}},
+        "output_schema": {"type": "array"},
         "required_permission": "read",
     },
     {
@@ -38,14 +34,14 @@ _TOOL_DEFINITIONS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "channel": {"type": "string", "description": "Channel ID (e.g. C01234ABC)"},
+                "channel": {"type": "string", "description": "Channel ID or name"},
                 "limit": {"type": "integer", "default": 50, "maximum": 200},
-                "oldest": {"type": "string", "description": "Start of time range (Unix timestamp as string)"},
-                "latest": {"type": "string", "description": "End of time range (Unix timestamp as string)"},
+                "oldest": {"type": "string", "description": "Start of time range (Unix timestamp)"},
+                "latest": {"type": "string", "description": "End of time range (Unix timestamp)"},
             },
             "required": ["channel"],
         },
-        "output_schema": {"type": "array", "items": {"type": "object"}},
+        "output_schema": {"type": "array"},
         "required_permission": "read",
     },
     {
@@ -54,17 +50,72 @@ _TOOL_DEFINITIONS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "channel": {"type": "string", "description": "Channel ID or name"},
-                "text": {"type": "string", "description": "Message text (supports mrkdwn)"},
-                "thread_ts": {
-                    "type": "string",
-                    "description": "Timestamp of parent message to reply in-thread",
-                },
+                "channel": {"type": "string", "description": "Channel ID or name (e.g. #engineering)"},
+                "text": {"type": "string", "description": "Message text (supports mrkdwn). Use {{step_results}} to inject prior step outputs."},
+                "thread_ts": {"type": "string", "description": "Reply in-thread to this message timestamp"},
             },
             "required": ["channel", "text"],
         },
         "output_schema": {"type": "object"},
         "required_permission": "write",
+    },
+    {
+        "tool_name": "update_message",
+        "description": "Update an existing Slack message",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "channel": {"type": "string"},
+                "ts": {"type": "string", "description": "Timestamp of message to update"},
+                "text": {"type": "string"},
+            },
+            "required": ["channel", "ts", "text"],
+        },
+        "output_schema": {"type": "object"},
+        "required_permission": "write",
+    },
+    {
+        "tool_name": "add_reaction",
+        "description": "Add an emoji reaction to a Slack message",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "channel": {"type": "string"},
+                "timestamp": {"type": "string", "description": "Message timestamp (ts)"},
+                "name": {"type": "string", "description": "Emoji name without colons (e.g. thumbsup)"},
+            },
+            "required": ["channel", "timestamp", "name"],
+        },
+        "output_schema": {"type": "object"},
+        "required_permission": "write",
+    },
+    {
+        "tool_name": "get_thread_replies",
+        "description": "Get all replies in a message thread",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "channel": {"type": "string"},
+                "thread_ts": {"type": "string", "description": "Timestamp of the parent message"},
+                "limit": {"type": "integer", "default": 50},
+            },
+            "required": ["channel", "thread_ts"],
+        },
+        "output_schema": {"type": "array"},
+        "required_permission": "read",
+    },
+    {
+        "tool_name": "list_users",
+        "description": "List all users in the Slack workspace",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "default": 100, "maximum": 200},
+                "include_bots": {"type": "boolean", "default": False},
+            },
+        },
+        "output_schema": {"type": "array"},
+        "required_permission": "read",
     },
     {
         "tool_name": "get_user_info",
@@ -81,21 +132,30 @@ _TOOL_DEFINITIONS = [
     },
     {
         "tool_name": "search_messages",
-        "description": "Search messages across the workspace (requires user token with search:read scope)",
+        "description": "Search messages across the workspace",
         "input_schema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Search query string"},
+                "query": {"type": "string"},
                 "count": {"type": "integer", "default": 20, "maximum": 100},
-                "sort": {
-                    "type": "string",
-                    "enum": ["score", "timestamp"],
-                    "default": "score",
-                },
+                "sort": {"type": "string", "enum": ["score", "timestamp"], "default": "score"},
             },
             "required": ["query"],
         },
-        "output_schema": {"type": "array", "items": {"type": "object"}},
+        "output_schema": {"type": "array"},
+        "required_permission": "read",
+    },
+    {
+        "tool_name": "get_channel_info",
+        "description": "Get metadata for a specific channel by ID or name",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "channel": {"type": "string", "description": "Channel ID or name"},
+            },
+            "required": ["channel"],
+        },
+        "output_schema": {"type": "object"},
         "required_permission": "read",
     },
 ]
@@ -148,11 +208,6 @@ async def _slack_request(
     headers: dict[str, str],
     payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Call a Slack Web API method.
-
-    GET → query params; POST → JSON body.
-    Raises AdapterError if HTTP fails or Slack returns ok=false.
-    """
     url = f"{SLACK_API_BASE}/{slack_method}"
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         if method == "POST":
@@ -165,14 +220,10 @@ async def _slack_request(
             resp = await client.get(url, headers=headers, params=payload)
 
     if resp.status_code >= 400:
-        raise AdapterError(
-            f"Slack API returned HTTP {resp.status_code}: {resp.text[:200]}",
-            status_code=resp.status_code,
-        )
+        raise AdapterError(f"Slack API returned HTTP {resp.status_code}: {resp.text[:200]}", status_code=resp.status_code)
     data: dict[str, Any] = resp.json()
     if not data.get("ok"):
-        error = data.get("error", "unknown_error")
-        raise AdapterError(f"Slack API error: {error}")
+        raise AdapterError(f"Slack API error: {data.get('error', 'unknown_error')}")
     return data
 
 
@@ -192,22 +243,20 @@ class SlackAdapter(BaseAdapter):
         headers: dict[str, str],
     ) -> Any:
         match tool_name:
-            case "list_channels":
-                return await self._list_channels(arguments, headers)
-            case "get_channel_history":
-                return await self._get_channel_history(arguments, headers)
-            case "post_message":
-                return await self._post_message(arguments, headers)
-            case "get_user_info":
-                return await self._get_user_info(arguments, headers)
-            case "search_messages":
-                return await self._search_messages(arguments, headers)
+            case "list_channels":       return await self._list_channels(arguments, headers)
+            case "get_channel_history": return await self._get_channel_history(arguments, headers)
+            case "post_message":        return await self._post_message(arguments, headers)
+            case "update_message":      return await self._update_message(arguments, headers)
+            case "add_reaction":        return await self._add_reaction(arguments, headers)
+            case "get_thread_replies":  return await self._get_thread_replies(arguments, headers)
+            case "list_users":          return await self._list_users(arguments, headers)
+            case "get_user_info":       return await self._get_user_info(arguments, headers)
+            case "search_messages":     return await self._search_messages(arguments, headers)
+            case "get_channel_info":    return await self._get_channel_info(arguments, headers)
             case _:
                 raise AdapterError(f"Unknown tool '{tool_name}' for Slack adapter")
 
-    async def _list_channels(
-        self, args: dict[str, Any], headers: dict[str, str]
-    ) -> list[dict[str, Any]]:
+    async def _list_channels(self, args: dict[str, Any], headers: dict[str, str]) -> list[dict[str, Any]]:
         payload: dict[str, Any] = {
             "limit": args.get("limit", 100),
             "exclude_archived": str(args.get("exclude_archived", True)).lower(),
@@ -216,13 +265,8 @@ class SlackAdapter(BaseAdapter):
         data = await _slack_request("GET", "conversations.list", headers, payload)
         return [_normalize_channel(c) for c in data.get("channels", [])]
 
-    async def _get_channel_history(
-        self, args: dict[str, Any], headers: dict[str, str]
-    ) -> list[dict[str, Any]]:
-        payload: dict[str, Any] = {
-            "channel": args["channel"],
-            "limit": args.get("limit", 50),
-        }
+    async def _get_channel_history(self, args: dict[str, Any], headers: dict[str, str]) -> list[dict[str, Any]]:
+        payload: dict[str, Any] = {"channel": args["channel"], "limit": args.get("limit", 50)}
         if oldest := args.get("oldest"):
             payload["oldest"] = oldest
         if latest := args.get("latest"):
@@ -230,34 +274,50 @@ class SlackAdapter(BaseAdapter):
         data = await _slack_request("POST", "conversations.history", headers, payload)
         return [_normalize_message(m) for m in data.get("messages", [])]
 
-    async def _post_message(
-        self, args: dict[str, Any], headers: dict[str, str]
-    ) -> dict[str, Any]:
+    async def _post_message(self, args: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
         text = args.get("text") or args.get("message") or args.get("content") or args.get("summary", "")
         payload: dict[str, Any] = {"channel": args["channel"], "text": text}
         if thread_ts := args.get("thread_ts"):
             payload["thread_ts"] = thread_ts
         data = await _slack_request("POST", "chat.postMessage", headers, payload)
-        return {
-            "ts": data.get("ts"),
-            "channel": data.get("channel"),
-            "message": _normalize_message(data.get("message") or {}),
-        }
+        return {"ts": data.get("ts"), "channel": data.get("channel"), "message": _normalize_message(data.get("message") or {})}
 
-    async def _get_user_info(
-        self, args: dict[str, Any], headers: dict[str, str]
-    ) -> dict[str, Any]:
+    async def _update_message(self, args: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
+        data = await _slack_request("POST", "chat.update", headers, {
+            "channel": args["channel"], "ts": args["ts"], "text": args["text"],
+        })
+        return {"ts": data.get("ts"), "channel": data.get("channel"), "text": data.get("text")}
+
+    async def _add_reaction(self, args: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
+        await _slack_request("POST", "reactions.add", headers, {
+            "channel": args["channel"],
+            "timestamp": args["timestamp"],
+            "name": args["name"],
+        })
+        return {"ok": True, "emoji": args["name"]}
+
+    async def _get_thread_replies(self, args: dict[str, Any], headers: dict[str, str]) -> list[dict[str, Any]]:
+        payload: dict[str, Any] = {
+            "channel": args["channel"],
+            "ts": args["thread_ts"],
+            "limit": args.get("limit", 50),
+        }
+        data = await _slack_request("GET", "conversations.replies", headers, payload)
+        return [_normalize_message(m) for m in data.get("messages", [])]
+
+    async def _list_users(self, args: dict[str, Any], headers: dict[str, str]) -> list[dict[str, Any]]:
+        payload: dict[str, Any] = {"limit": args.get("limit", 100)}
+        data = await _slack_request("GET", "users.list", headers, payload)
+        members = data.get("members", [])
+        include_bots = args.get("include_bots", False)
+        return [_normalize_user(u) for u in members if include_bots or not u.get("is_bot")]
+
+    async def _get_user_info(self, args: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
         data = await _slack_request("GET", "users.info", headers, {"user": args["user_id"]})
         return _normalize_user(data.get("user") or {})
 
-    async def _search_messages(
-        self, args: dict[str, Any], headers: dict[str, str]
-    ) -> list[dict[str, Any]]:
-        payload: dict[str, Any] = {
-            "query": args["query"],
-            "count": args.get("count", 20),
-            "sort": args.get("sort", "score"),
-        }
+    async def _search_messages(self, args: dict[str, Any], headers: dict[str, str]) -> list[dict[str, Any]]:
+        payload: dict[str, Any] = {"query": args["query"], "count": args.get("count", 20), "sort": args.get("sort", "score")}
         data = await _slack_request("GET", "search.messages", headers, payload)
         matches = (data.get("messages") or {}).get("matches", [])
         return [
@@ -270,3 +330,16 @@ class SlackAdapter(BaseAdapter):
             }
             for m in matches
         ]
+
+    async def _get_channel_info(self, args: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
+        channel = args["channel"]
+        if not channel.startswith("C"):
+            # Name lookup — list and find
+            all_channels = await self._list_channels({}, headers)
+            name = channel.lstrip("#")
+            match = next((c for c in all_channels if c["name"] == name), None)
+            if not match:
+                raise AdapterError(f"Channel '{channel}' not found")
+            return match
+        data = await _slack_request("GET", "conversations.info", headers, {"channel": channel})
+        return _normalize_channel(data.get("channel") or {})
