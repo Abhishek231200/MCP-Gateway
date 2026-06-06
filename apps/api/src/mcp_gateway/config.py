@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     # LLM providers
     openai_api_key: str = Field(default="")
 
+    # Email (Resend)
+    resend_api_key: str = Field(default="")
+
     # Security gateway (OPA)
     opa_url: str = Field(default="http://localhost:8181")
     # Maps actor name → role: "admin" | "engineer" | "viewer"

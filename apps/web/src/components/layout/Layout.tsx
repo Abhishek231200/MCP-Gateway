@@ -1,17 +1,24 @@
-import { Outlet } from "react-router-dom";
+import { useLocation, Outlet } from "react-router-dom";
 import Sidebar from "./Sidebar";
-import Topbar from "./Topbar";
 
 export default function Layout() {
+  const { pathname } = useLocation();
+  const isWorkflows = pathname === "/workflows";
+
   return (
-    <div className="flex h-screen overflow-hidden bg-gray-950">
+    <div className="flex h-screen overflow-hidden bg-[#0d0d0d]">
       <Sidebar />
-      <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
-        <Topbar />
-        <main className="flex-1 overflow-y-auto p-6">
+      <main className="flex-1 min-w-0 overflow-hidden">
+        {isWorkflows ? (
           <Outlet />
-        </main>
-      </div>
+        ) : (
+          <div className="h-full overflow-y-auto">
+            <div className="max-w-5xl mx-auto px-8 py-8">
+              <Outlet />
+            </div>
+          </div>
+        )}
+      </main>
     </div>
   );
 }

@@ -12,6 +12,7 @@ export interface AuditLogEntry {
   tool_name: string | null;
   allowed: boolean | null;
   policy_decision: Record<string, unknown> | null;
+  response_payload: Record<string, unknown> | null;
   latency_ms: number | null;
   created_at: string;
   entry_hash: string | null;

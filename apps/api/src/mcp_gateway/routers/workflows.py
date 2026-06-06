@@ -2,27 +2,196 @@
 
 import asyncio
 import json
+import re
 import uuid
+from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from mcp_gateway.config import settings
 from mcp_gateway.database import AsyncSessionLocal, get_db
+from mcp_gateway.models.registry import McpServer
 from mcp_gateway.models.workflow import Workflow, WorkflowStatus
 from mcp_gateway.schemas.workflows import (
     WorkflowCreate,
     WorkflowListResponse,
     WorkflowResponse,
 )
+from mcp_gateway.services.adapters.registry import get_adapter
 from mcp_gateway.services.orchestrator import WorkflowOrchestrator, register_approval_decision
 
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
+
+
+# ── Pre-flight analysis ───────────────────────────────────────────────────────
+
+class AnalyzeOption(BaseModel):
+    value: str
+    label: str
+
+class AnalyzeQuestion(BaseModel):
+    id: str
+    label: str
+    description: str
+    type: str          # "select" | "text"
+    required: bool
+    options: list[AnalyzeOption] = []
+    placeholder: str = ""
+
+class AnalyzeRequest(BaseModel):
+    task: str
+    actor: str = "user"
+
+class AnalyzeResponse(BaseModel):
+    needs_clarification: bool
+    questions: list[AnalyzeQuestion]
+
+
+async def _fetch_server(db: AsyncSession, adapter_type: str) -> McpServer | None:
+    result = await db.execute(
+        select(McpServer).where(
+            McpServer.metadata_["adapter_type"].astext == adapter_type,
+            McpServer.is_active == True,  # noqa: E712
+        ).limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def _live_options(db: AsyncSession, adapter_type: str, tool: str, args: dict, label_fn) -> list[AnalyzeOption]:
+    """Fetch live options from a registered adapter, return empty list on any failure."""
+    try:
+        server = await _fetch_server(db, adapter_type)
+        if not server:
+            return []
+        adapter = get_adapter(server)
+        from mcp_gateway.services.adapters.credentials import resolve_credentials
+        headers = resolve_credentials(server)
+        result = await adapter._execute_tool(server, tool, args, headers)  # type: ignore[attr-defined]
+        return [label_fn(item) for item in (result or [])][:20]
+    except Exception:
+        return []
+
+
+async def _fetch_jira_assignable_users(db: AsyncSession, project_key: str) -> list[AnalyzeOption]:
+    """Fetch users assignable to a Jira project via the Jira REST API."""
+    try:
+        server = await _fetch_server(db, "jira")
+        if not server:
+            return []
+        from mcp_gateway.services.adapters.credentials import resolve_credentials
+        from mcp_gateway.services.adapters.jira import JiraAdapter
+        adapter = JiraAdapter()
+        resolve_credentials(server)  # validate creds exist before calling
+        data = await adapter._jira_request(
+            "GET", server, "/user/assignable/search",
+            params={"project": project_key, "maxResults": 50},
+        )
+        users = data if isinstance(data, list) else []
+        return [
+            AnalyzeOption(
+                value=u.get("accountId", ""),
+                label=u.get("displayName", u.get("emailAddress", "Unknown")),
+            )
+            for u in users
+            if u.get("accountId") and u.get("active", True)
+        ]
+    except Exception:
+        return []
+
+
+@router.post("/analyze", response_model=AnalyzeResponse)
+async def analyze_workflow(
+    payload: AnalyzeRequest,
+    db: AsyncSession = Depends(get_db),
+) -> AnalyzeResponse:
+    """Analyze a task and return clarifying questions for missing required parameters."""
+    task = payload.task.lower()
+    questions: list[AnalyzeQuestion] = []
+
+    # ── Jira create/ticket detection ────────────────────────────────────────
+    jira_create = (
+        any(w in task for w in ["jira", "ticket", "jira ticket"]) and
+        any(w in task for w in ["create", "make", "open", "new", "add", "log"])
+    )
+    has_project_key = bool(re.search(r'\bproject[_\s]?(?:key\s*[=:]\s*)?\b([A-Z]{2,10})\b', payload.task))
+
+    if jira_create and not has_project_key:
+        project_options = await _live_options(
+            db, "jira", "list_projects", {},
+            lambda p: AnalyzeOption(value=p["key"], label=f"{p['key']} — {p.get('name', p['key'])}")
+        )
+        if not project_options:
+            project_options = [AnalyzeOption(value="MGORCH", label="MGORCH — MCP Gateway")]
+
+        questions.append(AnalyzeQuestion(
+            id="jira_project",
+            label="Jira Project",
+            description="Which project should the ticket be created in?",
+            type="select",
+            required=True,
+            options=project_options,
+        ))
+        questions.append(AnalyzeQuestion(
+            id="jira_priority",
+            label="Priority",
+            description="Ticket priority (optional — defaults to Medium)",
+            type="select",
+            required=False,
+            options=[
+                AnalyzeOption(value="Highest", label="Highest"),
+                AnalyzeOption(value="High", label="High"),
+                AnalyzeOption(value="Medium", label="Medium"),
+                AnalyzeOption(value="Low", label="Low"),
+                AnalyzeOption(value="Lowest", label="Lowest"),
+            ],
+        ))
+
+        # Fetch assignable users for the first available project
+        default_project = project_options[0].value
+        user_options = await _fetch_jira_assignable_users(db, default_project)
+        questions.append(AnalyzeQuestion(
+            id="jira_assignee",
+            label="Assignee",
+            description="Assign the ticket to a project member (optional)",
+            type="searchable_select",
+            required=False,
+            options=user_options,
+            placeholder="Search members…",
+        ))
+
+    # ── Slack channel detection ──────────────────────────────────────────────
+    slack_post = (
+        "slack" in task and
+        any(w in task for w in ["post", "send", "message", "notify", "share", "summar"])
+    )
+    has_channel = bool(re.search(r'#\w+|channel\s+\w+|in\s+\w+\s+channel', task))
+
+    if slack_post and not has_channel:
+        options = await _live_options(
+            db, "slack", "list_channels", {},
+            lambda c: AnalyzeOption(value=c.get("name", ""), label=f"#{c.get('name', '')}")
+        )
+        if options:
+            questions.append(AnalyzeQuestion(
+                id="slack_channel",
+                label="Slack Channel",
+                description="Which channel should the message be posted to?",
+                type="select",
+                required=True,
+                options=options,
+            ))
+
+    return AnalyzeResponse(
+        needs_clarification=len(questions) > 0,
+        questions=questions,
+    )
 
 
 # ── REST endpoints ────────────────────────────────────────────────────────────

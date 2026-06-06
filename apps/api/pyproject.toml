@@ -30,6 +30,8 @@ dependencies = [
     "anthropic>=0.40.0",
     "openai>=1.0.0",
     "langgraph>=0.2.0",
+    # Auth
+    "PyJWT>=2.8.0",
 ]
 
 [project.optional-dependencies]

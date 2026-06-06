@@ -2,6 +2,28 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import axios from "axios";
 
+// ── Analyze types ─────────────────────────────────────────────────────────────
+
+export interface AnalyzeOption {
+  value: string;
+  label: string;
+}
+
+export interface AnalyzeQuestion {
+  id: string;
+  label: string;
+  description: string;
+  type: "select" | "text" | "searchable_select";
+  required: boolean;
+  options: AnalyzeOption[];
+  placeholder: string;
+}
+
+export interface AnalyzeResponse {
+  needs_clarification: boolean;
+  questions: AnalyzeQuestion[];
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export type WorkflowStatus =
@@ -101,6 +123,15 @@ export function useCreateWorkflow() {
       return data;
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["workflows"] }),
+  });
+}
+
+export function useAnalyzeWorkflow() {
+  return useMutation({
+    mutationFn: async (payload: { task: string; actor?: string }) => {
+      const { data } = await axios.post<AnalyzeResponse>("/api/workflows/analyze", payload);
+      return data;
+    },
   });
 }
 

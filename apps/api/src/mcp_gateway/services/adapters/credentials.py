@@ -15,22 +15,20 @@ class CredentialResolutionError(Exception):
 def resolve_credentials(server: McpServer) -> dict[str, str]:
     """Resolve server auth_config into HTTP headers.
 
-    Supported auth_config schemas:
-      API_KEY / OAUTH2 / JWT:
-        {"token_env_var": "GITHUB_TOKEN"}
-        {"token_env_var": "X", "header_name": "Authorization", "header_prefix": "Bearer"}
-      NONE: {} -> returns {}
-    """
-    if server.auth_type == AuthType.NONE:
-        return {}
+    If auth_config.token_env_var is set, the token is always resolved regardless
+    of auth_type — auth_type=NONE only means no-auth when token_env_var is absent.
 
+    Supported auth_config schemas:
+      {"token_env_var": "GITHUB_TOKEN"}
+      {"token_env_var": "X", "header_name": "Authorization", "header_prefix": "Bearer"}
+      {} -> returns {} (truly no auth)
+    """
     cfg = server.auth_config or {}
     env_var = cfg.get("token_env_var")
+
     if not env_var:
-        raise CredentialResolutionError(
-            f"Server '{server.name}' has auth_type={server.auth_type} "
-            f"but auth_config.token_env_var is not set"
-        )
+        # No token configured — treat as no-auth (e.g. public endpoints)
+        return {}
 
     token = os.environ.get(env_var)
     if not token:

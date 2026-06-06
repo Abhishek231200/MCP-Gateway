@@ -296,6 +296,8 @@ class JiraAdapter(BaseAdapter):
             fields["priority"] = {"name": priority}
         if labels := args.get("labels"):
             fields["labels"] = labels
+        if assignee := (args.get("assignee") or "").strip():
+            fields["assignee"] = {"accountId": assignee}
         data = await self._jira_request("POST", server, "/issue", json={"fields": fields})
         return {"key": data.get("key"), "id": data.get("id"), "url": f"{self._base_url(server)}/browse/{data.get('key')}"}
 
@@ -357,9 +359,11 @@ class JiraAdapter(BaseAdapter):
         ]
 
     async def _assign_issue(self, server: McpServer, args: dict[str, Any]) -> dict[str, Any]:
-        await self._jira_request("PUT", server, f"/issue/{args['issue_key']}/assignee",
-                                  json={"accountId": args["account_id"]})
-        return {"key": args["issue_key"], "assigned_to": args["account_id"]}
+        issue_key = str(args["issue_key"]).strip()
+        account_id = str(args["account_id"]).strip()
+        await self._jira_request("PUT", server, f"/issue/{issue_key}/assignee",
+                                  json={"accountId": account_id})
+        return {"key": issue_key, "assigned_to": account_id}
 
     async def _get_sprint_issues(self, server: McpServer, args: dict[str, Any]) -> list[dict[str, Any]]:
         jql = f"project = {args['project_key']} AND sprint in openSprints() ORDER BY priority ASC"

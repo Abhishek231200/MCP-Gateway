@@ -18,6 +18,7 @@ class AuditLogResponse(BaseModel):
     tool_name: str | None
     allowed: bool | None
     policy_decision: dict[str, Any] | None
+    response_payload: dict[str, Any] | None
     latency_ms: int | None
     created_at: datetime
     entry_hash: str | None

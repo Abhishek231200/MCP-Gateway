@@ -84,43 +84,89 @@ function ActionBadge({ action }: { action: string }) {
 }
 
 function EntryRow({ entry }: { entry: AuditLogEntry }) {
+  const [expanded, setExpanded] = useState(false);
   const ts = new Date(entry.created_at);
   const reason = entry.policy_decision?.reason as string | undefined;
+  const errorMsg = entry.response_payload?.error as string | undefined;
+  const detail = reason || errorMsg;
+
   return (
-    <tr className="border-t border-gray-800 hover:bg-gray-800/40 transition-colors">
-      <td className="px-3 py-2.5 text-xs text-gray-400 font-mono whitespace-nowrap">
-        {ts.toLocaleDateString()} {ts.toLocaleTimeString()}
-      </td>
-      <td className="px-3 py-2.5 text-xs text-gray-200 font-mono max-w-[120px] truncate">
-        {entry.actor}
-      </td>
-      <td className="px-3 py-2.5">
-        <ActionBadge action={entry.action} />
-      </td>
-      <td className="px-3 py-2.5 text-xs text-gray-300">
-        {entry.server_name && (
-          <span className="font-mono text-brand-400">{entry.server_name}</span>
-        )}
-        {entry.server_name && entry.tool_name && (
-          <span className="text-gray-600"> / </span>
-        )}
-        {entry.tool_name && <span className="font-mono">{entry.tool_name}</span>}
-        {!entry.server_name && !entry.tool_name && (
-          <span className="text-gray-600">—</span>
-        )}
-      </td>
-      <td className="px-3 py-2.5">
-        <AllowedBadge allowed={entry.allowed} />
-        {reason && (
-          <p className="text-xs text-gray-500 mt-0.5 max-w-[200px] truncate" title={reason}>
-            {reason}
-          </p>
-        )}
-      </td>
-      <td className="px-3 py-2.5 text-xs text-gray-400 font-mono text-right">
-        {entry.latency_ms != null ? `${entry.latency_ms}ms` : "—"}
-      </td>
-    </tr>
+    <>
+      <tr
+        className={`border-t border-gray-800 hover:bg-white/[0.02] transition-colors cursor-pointer ${expanded ? "bg-white/[0.02]" : ""}`}
+        onClick={() => setExpanded((v) => !v)}
+      >
+        <td className="px-3 py-2.5 text-xs text-gray-400 font-mono whitespace-nowrap">
+          {ts.toLocaleDateString()} {ts.toLocaleTimeString()}
+        </td>
+        <td className="px-3 py-2.5 text-xs text-gray-200 font-mono max-w-[120px] truncate">
+          {entry.actor}
+        </td>
+        <td className="px-3 py-2.5">
+          <ActionBadge action={entry.action} />
+        </td>
+        <td className="px-3 py-2.5 text-xs text-gray-300">
+          {entry.server_name && (
+            <span className="font-mono text-brand-400">{entry.server_name}</span>
+          )}
+          {entry.server_name && entry.tool_name && (
+            <span className="text-gray-600"> / </span>
+          )}
+          {entry.tool_name && <span className="font-mono">{entry.tool_name}</span>}
+          {!entry.server_name && !entry.tool_name && (
+            <span className="text-gray-600">—</span>
+          )}
+        </td>
+        <td className="px-3 py-2.5">
+          <AllowedBadge allowed={entry.allowed} />
+          {detail && !expanded && (
+            <p className="text-xs text-gray-600 mt-0.5 max-w-[200px] truncate" title={detail}>
+              {detail}
+            </p>
+          )}
+        </td>
+        <td className="px-3 py-2.5 text-xs text-gray-400 font-mono text-right">
+          {entry.latency_ms != null ? `${entry.latency_ms}ms` : "—"}
+        </td>
+      </tr>
+      {expanded && (
+        <tr className="border-t border-gray-800 bg-white/[0.02]">
+          <td colSpan={6} className="px-4 py-3">
+            <div className="space-y-2 text-xs font-mono">
+              {errorMsg && (
+                <div>
+                  <p className="text-gray-500 mb-1 uppercase tracking-wide text-[10px]">Error</p>
+                  <p className="text-red-300 break-all whitespace-pre-wrap">{errorMsg}</p>
+                </div>
+              )}
+              {reason && (
+                <div>
+                  <p className="text-gray-500 mb-1 uppercase tracking-wide text-[10px]">Policy reason</p>
+                  <p className="text-yellow-300 break-all">{reason}</p>
+                </div>
+              )}
+              {entry.policy_decision && Object.keys(entry.policy_decision).length > 0 && (
+                <div>
+                  <p className="text-gray-500 mb-1 uppercase tracking-wide text-[10px]">Policy decision</p>
+                  <pre className="text-gray-400 text-[11px] overflow-x-auto">
+                    {JSON.stringify(entry.policy_decision, null, 2)}
+                  </pre>
+                </div>
+              )}
+              {entry.response_payload && Object.keys(entry.response_payload).length > 0 && (
+                <div>
+                  <p className="text-gray-500 mb-1 uppercase tracking-wide text-[10px]">Response payload</p>
+                  <pre className="text-gray-400 text-[11px] overflow-x-auto max-h-40">
+                    {JSON.stringify(entry.response_payload, null, 2)}
+                  </pre>
+                </div>
+              )}
+              <p className="text-gray-700 text-[10px] pt-1">ID: {entry.id as string} · hash: {entry.entry_hash?.slice(0, 16) ?? "—"}</p>
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
   );
 }
 

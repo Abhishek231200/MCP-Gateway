@@ -391,7 +391,7 @@ class GitHubAdapter(BaseAdapter):
 
     @staticmethod
     def _require(args: dict[str, Any], *keys: str) -> None:
-        missing = [k for k in keys if k not in args or args[k] is None]
+        missing = [k for k in keys if not args.get(k)]
         if missing:
             raise AdapterError(
                 f"Missing required argument(s): {', '.join(missing)}. "
