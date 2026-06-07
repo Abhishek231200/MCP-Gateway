@@ -59,6 +59,10 @@ class Workflow(Base):
     total_tokens_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     total_cost_usd: Mapped[float | None] = mapped_column(nullable=True)
 
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True, index=True
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
     )

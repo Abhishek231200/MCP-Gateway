@@ -12,6 +12,7 @@ from mcp_gateway.models.workflow import StepStatus, WorkflowStatus
 class WorkflowCreate(BaseModel):
     task: str = Field(min_length=1, max_length=4096, description="Natural-language task to execute")
     actor: str = Field(default="user", max_length=256)
+    conversation_id: uuid.UUID | None = Field(default=None, description="Root workflow ID to group follow-up messages")
 
 
 class WorkflowStepResponse(BaseModel):
@@ -43,6 +44,7 @@ class WorkflowResponse(BaseModel):
     result: dict[str, Any] | None
     error_message: str | None
     total_tokens_used: int
+    conversation_id: uuid.UUID | None
     created_at: datetime
     updated_at: datetime
     completed_at: datetime | None

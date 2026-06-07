@@ -117,8 +117,8 @@ async def analyze_workflow(
 
     # ── Jira create/ticket detection ────────────────────────────────────────
     jira_create = (
-        any(w in task for w in ["jira", "ticket", "jira ticket"]) and
-        any(w in task for w in ["create", "make", "open", "new", "add", "log"])
+        any(w in task for w in ["jira", "ticket", "jira ticket", "issue"]) and
+        any(w in task for w in ["create", "make", "open", "new", "add", "log", "raise", "file", "submit", "write"])
     )
     has_project_key = bool(re.search(r'\bproject[_\s]?(?:key\s*[=:]\s*)?\b([A-Z]{2,10})\b', payload.task))
 
@@ -164,6 +164,57 @@ async def analyze_workflow(
             required=False,
             options=user_options,
             placeholder="Search members…",
+        ))
+
+    # ── GitHub PR detection (needs a PR number) ─────────────────────────────
+    has_pr_number = bool(re.search(r'\b(?:pr|pull request|#)\s*\d+\b', task))
+    github_pr_read = (
+        not has_pr_number
+        and any(w in task for w in ["pr", "pull request"])
+        and any(w in task for w in [
+            "assigned", "who", "status", "details", "get", "fetch", "show",
+            "merged", "review", "what", "description", "changes", "diff",
+        ])
+        # Exclude broad list queries
+        and not any(w in task for w in ["list", "all", "open prs", "all prs"])
+    )
+
+    if github_pr_read:
+        questions.append(AnalyzeQuestion(
+            id="github_pr_number",
+            label="Pull Request Number",
+            description="Which PR are you referring to?",
+            type="text",
+            required=True,
+            options=[],
+            placeholder="e.g. 42",
+        ))
+
+    # ── Jira read/get detection (needs specific issue key) ─────────────────
+    # Trigger when the task asks about a specific ticket but no KEY-NNN is given
+    has_issue_key = bool(re.search(r'\b[A-Z]{2,10}-\d+\b', payload.task))
+    jira_read = (
+        not jira_create
+        and not has_issue_key
+        and any(w in task for w in ["jira", "ticket", "issue", "jira ticket"])
+        and any(w in task for w in [
+            "assigned", "assignee", "who is", "status", "details", "describe",
+            "get", "fetch", "show", "find", "look up", "lookup", "what is",
+            "priority", "comment", "due date", "reporter",
+        ])
+        # Exclude broad queries like "get sprint issues" or "list all issues"
+        and not any(w in task for w in ["sprint", "list", "all issues", "all tickets", "search", "summarize", "summary"])
+    )
+
+    if jira_read:
+        questions.append(AnalyzeQuestion(
+            id="jira_issue_key",
+            label="Jira Issue Key",
+            description="Which Jira issue are you referring to?",
+            type="text",
+            required=True,
+            options=[],
+            placeholder="e.g. MGORCH-42",
         ))
 
     # ── Slack channel detection ──────────────────────────────────────────────
@@ -213,17 +264,43 @@ async def create_workflow(
         task=payload.task,
         initiated_by=payload.actor,
         status=WorkflowStatus.PENDING,
+        conversation_id=payload.conversation_id,
     )
     db.add(workflow)
     await db.flush()
     await db.refresh(workflow, ["steps"])
+
+    # Build prior context from the conversation history so the planner can
+    # resolve references like "this PR", "that ticket", "that repo", etc.
+    prior_context: str | None = None
+    if payload.conversation_id:
+        prior_result = await db.execute(
+            select(Workflow)
+            .where(
+                (Workflow.id == payload.conversation_id)
+                | (Workflow.conversation_id == payload.conversation_id)
+            )
+            .order_by(Workflow.created_at.asc())
+        )
+        prior_workflows = list(prior_result.scalars().all())
+        if prior_workflows:
+            lines: list[str] = []
+            for pw in prior_workflows[-4:]:  # last 4 turns max
+                answer = (pw.result or {}).get("answer", "") or ""
+                # Trim answer but keep enough for ID extraction (PR numbers, issue keys)
+                answer_snippet = answer[:600].strip()
+                lines.append(
+                    f"Turn: {pw.task}\n"
+                    f"Result: {answer_snippet or '(pending or no result)'}"
+                )
+            prior_context = "\n\n---\n\n".join(lines)
 
     # Commit before scheduling background task so the task's own session can
     # find the record immediately.
     await db.commit()
 
     asyncio.create_task(
-        _run_workflow_background(str(workflow.id), payload.task, payload.actor)
+        _run_workflow_background(str(workflow.id), payload.task, payload.actor, prior_context=prior_context)
     )
 
     logger.info("workflows.created", workflow_id=str(workflow.id), actor=payload.actor)
@@ -234,18 +311,30 @@ async def create_workflow(
 async def list_workflows(
     limit: int = 20,
     offset: int = 0,
+    roots_only: bool = False,
+    conversation_root_id: uuid.UUID | None = None,
     db: AsyncSession = Depends(get_db),
 ) -> WorkflowListResponse:
-    total_result = await db.execute(select(func.count()).select_from(Workflow))
+    filters = []
+    if conversation_root_id is not None:
+        # Return all workflows that belong to this conversation (root + follow-ups)
+        filters.append(
+            (Workflow.id == conversation_root_id) | (Workflow.conversation_id == conversation_root_id)
+        )
+    elif roots_only:
+        # Only top-level (root) workflows — follow-ups are hidden from sidebar
+        filters.append(Workflow.conversation_id.is_(None))
+
+    count_stmt = select(func.count(Workflow.id))
+    for f in filters:
+        count_stmt = count_stmt.where(f)
+    total_result = await db.execute(count_stmt)
     total: int = total_result.scalar_one()
 
-    stmt = (
-        select(Workflow)
-        .options(selectinload(Workflow.steps))
-        .order_by(Workflow.created_at.desc())
-        .limit(limit)
-        .offset(offset)
-    )
+    order = Workflow.created_at.asc() if conversation_root_id else Workflow.created_at.desc()
+    stmt = select(Workflow).options(selectinload(Workflow.steps)).order_by(order).limit(limit).offset(offset)
+    for f in filters:
+        stmt = stmt.where(f)
     result = await db.execute(stmt)
     workflows = list(result.scalars().all())
 
@@ -429,12 +518,14 @@ async def stream_workflow_events(
 
 # ── Background runner ─────────────────────────────────────────────────────────
 
-async def _run_workflow_background(workflow_id: str, task: str, actor: str) -> None:
+async def _run_workflow_background(
+    workflow_id: str, task: str, actor: str, prior_context: str | None = None
+) -> None:
     """Background asyncio task: runs the orchestrator with its own DB session."""
     async with AsyncSessionLocal() as db:
         try:
             orchestrator = WorkflowOrchestrator(db)
-            await orchestrator.run(workflow_id, task, actor)
+            await orchestrator.run(workflow_id, task, actor, prior_context=prior_context)
             await db.commit()
         except Exception as exc:
             await db.rollback()

@@ -62,6 +62,7 @@ export interface Workflow {
   result: Record<string, unknown> | null;
   error_message: string | null;
   total_tokens_used: number;
+  conversation_id: string | null;
   created_at: string;
   updated_at: string;
   completed_at: string | null;
@@ -87,16 +88,30 @@ const TERMINAL_EVENT_TYPES = new Set(["workflow_completed", "workflow_failed"]);
 
 // ── REST hooks ────────────────────────────────────────────────────────────────
 
-export function useWorkflows(limit = 20) {
+export function useWorkflows(limit = 20, rootsOnly = false) {
   return useQuery<WorkflowListResponse>({
-    queryKey: ["workflows"],
+    queryKey: ["workflows", limit, rootsOnly],
     queryFn: async () => {
       const { data } = await axios.get<WorkflowListResponse>("/api/workflows", {
-        params: { limit },
+        params: { limit, roots_only: rootsOnly },
       });
       return data;
     },
     refetchInterval: 5_000,
+  });
+}
+
+export function useConversation(rootId: string | null) {
+  return useQuery<Workflow[]>({
+    queryKey: ["conversation", rootId],
+    queryFn: async () => {
+      const { data } = await axios.get<WorkflowListResponse>("/api/workflows", {
+        params: { conversation_root_id: rootId },
+      });
+      return data.items;
+    },
+    enabled: rootId !== null,
+    refetchInterval: 3_000,
   });
 }
 
@@ -118,11 +133,16 @@ export function useWorkflow(id: string | null) {
 export function useCreateWorkflow() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (payload: { task: string; actor?: string }) => {
+    mutationFn: async (payload: { task: string; actor?: string; conversation_id?: string | null }) => {
       const { data } = await axios.post<Workflow>("/api/workflows", payload);
       return data;
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["workflows"] }),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: ["workflows"] });
+      if (vars.conversation_id) {
+        qc.invalidateQueries({ queryKey: ["conversation", vars.conversation_id] });
+      }
+    },
   });
 }
 

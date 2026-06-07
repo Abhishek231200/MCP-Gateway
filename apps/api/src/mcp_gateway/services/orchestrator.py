@@ -82,6 +82,8 @@ class WorkflowState(TypedDict):
     final_answer: str | None
     # Set on unrecoverable failure; signals END
     error: str | None
+    # Prior conversation turns — lets planner resolve "this PR", "that ticket", etc.
+    prior_context: str | None
 
 
 # ── Orchestrator class ────────────────────────────────────────────────────────
@@ -128,7 +130,7 @@ class WorkflowOrchestrator:
     def _is_openai(self) -> bool:
         return True
 
-    async def run(self, workflow_id: str, task: str, actor: str) -> None:
+    async def run(self, workflow_id: str, task: str, actor: str, prior_context: str | None = None) -> None:
         """Build initial state, drive the graph, handle top-level failures."""
         if not settings.openai_api_key:
             await self._update_workflow_status(
@@ -163,6 +165,7 @@ class WorkflowOrchestrator:
             "replan_count": 0,
             "final_answer": None,
             "error": None,
+            "prior_context": prior_context,
         }
 
         try:
@@ -214,13 +217,26 @@ class WorkflowOrchestrator:
             "You must respond with valid JSON and nothing else — no markdown, no explanation."
         )
 
+        prior_context_section = ""
+        if state.get("prior_context"):
+            prior_context_section = (
+                f"\n\nCONVERSATION CONTEXT — previous turns in this session:\n"
+                f"{state['prior_context']}\n\n"
+                f"Use this context to resolve pronouns and references in the current task:\n"
+                f"- 'this PR' / 'the PR' → extract the PR number from context\n"
+                f"- 'that ticket' / 'the ticket' → extract the Jira issue key from context\n"
+                f"- 'that repo' / 'the repo' → use the repository mentioned in context\n"
+                f"- 'that' / 'it' / 'this' → refer to the entity most recently discussed\n"
+                f"If a specific ID (PR number, issue key, etc.) is visible in the context, use it directly."
+            )
+
         user_prompt = (
             f"Available tools:\n{tool_manifest}\n\n"
-            f"Task: {state['task']}{replan_context}\n\n"
+            f"Task: {state['task']}{replan_context}{prior_context_section}\n\n"
             f"RULES — follow exactly:\n"
             f"1. Plan EXACTLY one step per distinct action the task requests — no more, no fewer.\n"
             f"2. For EVERY argument, read the tool's input_schema above and use the exact key names shown.\n"
-            f"3. Extract arguments directly from the task text:\n"
+            f"3. Extract arguments directly from the task text and conversation context:\n"
             f"   - GitHub 'OWNER/REPO' format → split into owner='OWNER' and repo='REPO' as separate fields.\n"
             f"   - If a GitHub tool requires 'owner'/'repo' but the task does NOT specify them, default to owner='Abhishek231200' and repo='mcp-gateway-backend'.\n"
             f"   - If a Jira tool requires 'project_key' but the task does NOT specify one, default to project_key='MGORCH'.\n"
@@ -683,13 +699,23 @@ class WorkflowOrchestrator:
             f"Task: {state['task']}\n\n"
             f"Execution results:\n{results_text}\n\n"
             f"Your entire response must be a single JSON object with these exact keys:\n"
-            f"  sufficient: true if the results answer the task, false if all steps failed or results are empty\n"
-            f"  answer: a markdown-formatted string with the actual answer — "
-            f"use tables for lists, bullets for summaries, prose for explanations. "
-            f"Include real names and values. This MUST be a string, not an array or object.\n"
-            f"  feedback: empty string if sufficient, otherwise a short description of what failed\n\n"
-            f"Example of a valid response:\n"
-            f'{{"sufficient": true, "answer": "## Repositories\\n| Name | Language |\\n|---|---|\\n| repo1 | Python |", "feedback": ""}}'
+            f"  sufficient: true if ALL steps completed without errors — even if the results are empty, "
+            f"null, or show that no data exists (e.g. no active sprint, ticket has no assignee, no PRs). "
+            f"These ARE valid answers that should be reported to the user. "
+            f"Set sufficient: false ONLY when one or more steps FAILED with an actual error "
+            f"(auth error, network error, missing required parameter, API rejection, etc.).\n"
+            f"  answer: a markdown-formatted string with the actual answer. "
+            f"If results are empty or null, say so explicitly and helpfully "
+            f"(e.g. 'There are no active sprint issues in this project.' or 'This ticket has no assignee — it is currently unassigned.'). "
+            f"Use tables for lists, bullets for summaries, prose for explanations. "
+            f"Include real names and values from the results. This MUST be a string, not an array or object.\n"
+            f"  feedback: empty string if sufficient, otherwise a one-line description of what error occurred\n\n"
+            f"Example — empty result is still sufficient:\n"
+            f'{{"sufficient": true, "answer": "There are no active sprint issues in the MGORCH project.", "feedback": ""}}\n\n'
+            f"Example — null field is still sufficient:\n"
+            f'{{"sufficient": true, "answer": "Ticket MGORCH-5 is currently **unassigned** — no assignee has been set.", "feedback": ""}}\n\n'
+            f"Example — actual error is insufficient:\n"
+            f'{{"sufficient": false, "answer": "", "feedback": "Step 1 failed: authentication error calling Jira API"}}'
         )
 
         client = self._llm_client()
